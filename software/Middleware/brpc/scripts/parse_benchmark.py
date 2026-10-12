@@ -13,9 +13,12 @@ from pathlib import Path
 
 ATTACHMENT_SIZES = (0, 1024, 4096, 8192, 102400, 204800, 1048576, 8388608)
 REPETITIONS = 5
+MAX_INFLIGHT_ATTACHMENT_BYTES = 32 * 1024 * 1024
+MAX_CLIENT_THREADS = 32
+MAX_QUEUE_DEPTH = 32
 NUMBER = r"([0-9]+(?:\.[0-9]+)?)"
 SCENARIO = re.compile(
-    r"\[Threads:\s*32,\s*Depth:\s*32,\s*Attachment:\s*(\d+)B,\s*"
+    r"\[Threads:\s*(\d+),\s*Depth:\s*(\d+),\s*Attachment:\s*(\d+)B,\s*"
     r"RDMA:\s*no,\s*Echo:\s*yes\]"
 )
 SUMMARY_FIELDS = {
@@ -26,6 +29,15 @@ SUMMARY_FIELDS = {
     "throughput": (r"Throughput:\s*" + NUMBER + r"MB/s", "MB/s", "higher_is_better"),
     "qps": (r"QPS:\s*" + NUMBER + r"k(?:\s|,|$)", "requests/s", "higher_is_better"),
 }
+
+
+def client_workload(attachment_size: int) -> tuple[int, int]:
+    if attachment_size == 0:
+        return MAX_CLIENT_THREADS, MAX_QUEUE_DEPTH
+    max_inflight = MAX_INFLIGHT_ATTACHMENT_BYTES // attachment_size
+    threads = min(MAX_CLIENT_THREADS, max_inflight)
+    depth = min(MAX_QUEUE_DEPTH, max_inflight // threads)
+    return threads, depth
 
 
 def parse_summary(line: str, attachment_size: int) -> dict[str, float]:
@@ -58,9 +70,15 @@ def parse_client_log(text: str) -> dict[str, dict[str, object]]:
     for line in text.splitlines():
         match = SCENARIO.search(line)
         if match:
-            current_size = int(match.group(1))
+            threads, depth, current_size = map(int, match.groups())
             if current_size not in scenarios:
                 raise ValueError(f"unexpected attachment size: {current_size}B")
+            expected_threads, expected_depth = client_workload(current_size)
+            if (threads, depth) != (expected_threads, expected_depth):
+                raise ValueError(
+                    f"{current_size}B requires {expected_threads} threads and depth "
+                    f"{expected_depth}, found {threads} threads and depth {depth}"
+                )
             continue
         if "Avg-Latency:" not in line:
             continue
@@ -84,6 +102,8 @@ def parse_client_log(text: str) -> dict[str, dict[str, object]]:
                 "source_field": "client_stdout.Throughput" if name == "qps" and attachment_size else "client_stdout",
                 "group": group,
                 "attachment_size": attachment_size,
+                "client_threads": client_workload(attachment_size)[0],
+                "queue_depth": client_workload(attachment_size)[1],
                 "measurement": name,
                 "samples": samples,
                 "repetitions": REPETITIONS,
@@ -117,8 +137,11 @@ def main() -> int:
             "connection_type": "single",
             "server": "127.0.0.1:8003",
             "server_bthread_concurrency": 32,
-            "client_threads": 32,
-            "queue_depth": 32,
+            "max_inflight_attachment_bytes": MAX_INFLIGHT_ATTACHMENT_BYTES,
+            "client_workloads": {
+                str(size): {"threads": client_workload(size)[0], "queue_depth": client_workload(size)[1]}
+                for size in ATTACHMENT_SIZES
+            },
             "client_bthread_concurrency": 160,
             "attachment_sizes": list(ATTACHMENT_SIZES),
             "repetitions": REPETITIONS,

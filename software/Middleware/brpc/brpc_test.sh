@@ -13,6 +13,9 @@ RDMA_SERVER_PORT=8003
 RDMA_CLIENT_DUMMY_PORT=8001
 BRPC_ATTACHMENT_SIZES=(0 1024 4096 8192 102400 204800 1048576 8388608)
 BRPC_REPETITIONS=5
+BRPC_MAX_INFLIGHT_ATTACHMENT_BYTES=$((32 * 1024 * 1024))
+BRPC_MAX_CLIENT_THREADS=32
+BRPC_MAX_QUEUE_DEPTH=32
 
 SOURCE_DIR=""
 BUILD_DIR=""
@@ -382,7 +385,7 @@ start_brpc_service() {
 }
 
 run_brpc_rdma_performance() {
-    local server_pid attachment_size repetition
+    local server_pid attachment_size repetition client_threads queue_depth max_inflight
 
     initialize_runtime || return $?
     [[ -x "${RDMA_CLIENT_BIN}" ]] || {
@@ -405,15 +408,27 @@ run_brpc_rdma_performance() {
     }
     : > "${CLIENT_LOG_FILE}"
     for attachment_size in "${BRPC_ATTACHMENT_SIZES[@]}"; do
+        client_threads="${BRPC_MAX_CLIENT_THREADS}"
+        queue_depth="${BRPC_MAX_QUEUE_DEPTH}"
+        if ((attachment_size > 0)); then
+            max_inflight=$((BRPC_MAX_INFLIGHT_ATTACHMENT_BYTES / attachment_size))
+            if ((max_inflight < client_threads)); then
+                client_threads="${max_inflight}"
+            fi
+            queue_depth=$((max_inflight / client_threads))
+            if ((queue_depth > BRPC_MAX_QUEUE_DEPTH)); then
+                queue_depth="${BRPC_MAX_QUEUE_DEPTH}"
+            fi
+        fi
         for ((repetition = 1; repetition <= BRPC_REPETITIONS; repetition += 1)); do
-            log_message "running TCP baidu_std echo: ${attachment_size}B, repetition ${repetition}/${BRPC_REPETITIONS} (20s)"
+            log_message "running TCP baidu_std echo: ${attachment_size}B, ${client_threads} threads, depth ${queue_depth}, repetition ${repetition}/${BRPC_REPETITIONS} (20s)"
             if ! "${RDMA_CLIENT_BIN}" \
                 --use_rdma=false \
                 --protocol=baidu_std \
                 --connection_type=single \
                 --servers="127.0.0.1:${RDMA_SERVER_PORT}" \
-                --thread_num=32 \
-                --queue_depth=32 \
+                --thread_num="${client_threads}" \
+                --queue_depth="${queue_depth}" \
                 --bthread_concurrency=160 \
                 --attachment_size="${attachment_size}" \
                 --echo_attachment=true \
