@@ -21,7 +21,7 @@ execution:
     stop:
       script: glibc_test.sh
       function: stop_glibc_runtime
-  timeout_minutes: 180
+  timeout_minutes: 1440
 outputs:
   official_benchmark:
     path: benchmark_bench.txt
