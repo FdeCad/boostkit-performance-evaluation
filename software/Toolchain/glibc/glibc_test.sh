@@ -16,13 +16,16 @@ RESULTS_DIR="${RESULTS_DIR:-}"
 PERF_WORK_DIR="${PERF_WORK_DIR:-}"
 PERF_ACTUAL_VERSION_FILE="${PERF_ACTUAL_VERSION_FILE:-}"
 GLIBC_SOURCE_URL="${GLIBC_SOURCE_URL:-https://ftp.gnu.org/gnu/glibc}"
-# glibc 2.31 only accepts benchset names at build time. Build the official
-# string benchset, then run only these two executables.
-GLIBC_BENCHSET="string-benchset"
+MAKE_SOURCE_URL="https://ftp.gnu.org/gnu/make"
+MAKE_VERSION="4.3"
+MAKE_ARCHIVE_SHA256="e05fdde47c5f7ca45cb697e973894ff4f5d79e13b750ed57d7b66d8defc78e19"
+# Build and run only these two official benchtest executables.
+GLIBC_BENCHSET="memcpy memcmp"
 GLIBC_BENCHMARKS=(bench-memcpy bench-memcmp)
 SRC_DIR=""
 BUILD_DIR=""
 INSTALL_DIR=""
+MAKE_INSTALL_DIR=""
 LDCONFIG_BIN=""
 GCC_VERSION_STRING=""
 TIMING_TYPE_OUTPUT=""
@@ -68,7 +71,13 @@ configure_runtime_paths() {
     SRC_DIR="${PERF_WORK_DIR}/glibc-src"
     BUILD_DIR="${PERF_WORK_DIR}/glibc-build"
     INSTALL_DIR="${PERF_WORK_DIR}/glibc-install"
+    MAKE_INSTALL_DIR="${PERF_WORK_DIR}/make-${MAKE_VERSION}-install"
     LDCONFIG_BIN="${BUILD_DIR}/elf/ldconfig"
+    if [[ -x "${MAKE_INSTALL_DIR}/bin/make" &&
+          "${PATH}" != "${MAKE_INSTALL_DIR}/bin:"* ]]; then
+        PATH="${MAKE_INSTALL_DIR}/bin:${PATH}"
+        export PATH
+    fi
     export SOFTWARE_VERSION EXPECTED_ARCH PERF_RUN_ID RESULTS_DIR PERF_WORK_DIR
     export PERF_ACTUAL_VERSION_FILE TMPDIR
 }
@@ -201,6 +210,56 @@ prepare_glibc_source() {
     fi
 }
 
+prepare_compatible_make() {
+    local archive="${PERF_WORK_DIR}/make-${MAKE_VERSION}.tar.gz"
+    local local_archive="/home/runner/software/glibc/make-${MAKE_VERSION}.tar.gz"
+    local source_dir="${PERF_WORK_DIR}/make-${MAKE_VERSION}-src"
+    local actual_sha256
+
+    if [[ -f "${local_archive}" ]]; then
+        archive="${local_archive}"
+        log "using local GNU Make archive ${archive}"
+    else
+        log "downloading GNU Make ${MAKE_VERSION} from ${MAKE_SOURCE_URL}"
+        if ! curl -fsSL --retry 3 --connect-timeout 30 \
+            -o "${archive}" "${MAKE_SOURCE_URL}/make-${MAKE_VERSION}.tar.gz"; then
+            rm -f "${archive}"
+            log "ERROR: failed to download GNU Make ${MAKE_VERSION}"
+            return 30
+        fi
+    fi
+    actual_sha256="$(sha256sum "${archive}" | awk '{print $1}')"
+    if [[ "${actual_sha256}" != "${MAKE_ARCHIVE_SHA256}" ]]; then
+        log "ERROR: GNU Make ${MAKE_VERSION} archive checksum mismatch"
+        return 30
+    fi
+    mkdir -p "${source_dir}"
+    if ! tar -xzf "${archive}" -C "${source_dir}" --strip-components=1; then
+        log "ERROR: failed to extract GNU Make ${MAKE_VERSION}"
+        return 30
+    fi
+    if [[ "${archive}" == "${PERF_WORK_DIR}/"* ]]; then
+        rm -f "${archive}"
+    fi
+    log "building GNU Make ${MAKE_VERSION} in the private work directory"
+    (
+        cd "${source_dir}"
+        ./configure --prefix="${MAKE_INSTALL_DIR}" --disable-nls
+        make -j4
+        make install
+    ) || {
+        log "ERROR: failed to build GNU Make ${MAKE_VERSION}"
+        return 30
+    }
+    if [[ "$("${MAKE_INSTALL_DIR}/bin/make" --version | head -n 1)" != "GNU Make ${MAKE_VERSION}" ]]; then
+        log "ERROR: private GNU Make ${MAKE_VERSION} is unavailable"
+        return 30
+    fi
+    PATH="${MAKE_INSTALL_DIR}/bin:${PATH}"
+    export PATH
+    log "using private $(make --version | head -n 1)"
+}
+
 build_glibc() {
     local actual_version
     local version_output
@@ -212,6 +271,7 @@ build_glibc() {
         return 20
     fi
     prepare_glibc_source || return $?
+    prepare_compatible_make || return $?
     GCC_VERSION_STRING="$(gcc --version | head -n 1)"
 
     log "configuring glibc ${SOFTWARE_VERSION} (out-of-tree build)"
@@ -231,7 +291,9 @@ build_glibc() {
     (
         cd "${BUILD_DIR}"
         unset LD_LIBRARY_PATH
-        make -j"$(nproc)"
+        # The runner's newer libstdc++ requires symbols absent from glibc 2.31.
+        # Use glibc's C implementation of its build-only links-dso helper.
+        make -j"$(nproc)" CXX=
     ) || {
         log "ERROR: glibc make build failed"
         return 40
@@ -244,7 +306,7 @@ build_glibc() {
     (
         cd "${BUILD_DIR}"
         unset LD_LIBRARY_PATH
-        make install cross-compiling=yes
+        make install cross-compiling=yes CXX=
     ) || {
         log "ERROR: glibc installation into ${INSTALL_DIR} failed"
         return 40
@@ -279,18 +341,22 @@ start_glibc_runtime() {
     # runner environment again.  Do not let host library search paths affect
     # the freshly built glibc benchtest tools.
     unset LD_LIBRARY_PATH
+    if [[ "$(make --version | head -n 1)" != "GNU Make ${MAKE_VERSION}" ]]; then
+        log "ERROR: private GNU Make ${MAKE_VERSION} is required for glibc 2.31 benchtests"
+        return 40
+    fi
     if [[ ! -x "${LDCONFIG_BIN}" ]]; then
         log "ERROR: glibc is not built; run the build stage first"
         return 40
     fi
-    log "building glibc 2.31 ${GLIBC_BENCHSET} for memcpy and memcmp"
-    (
-        cd "${BUILD_DIR}"
-        make bench-build BENCHSET="${GLIBC_BENCHSET}"
-    ) || {
-        log "ERROR: glibc bench-build failed"
+    log "building glibc 2.31 memcpy and memcmp benchtests"
+    if ! make -C "${SRC_DIR}/benchtests" objdir="${BUILD_DIR}" \
+        "${BUILD_DIR}/benchtests/bench-timing-type" \
+        "${BUILD_DIR}/benchtests/bench-memcpy" \
+        "${BUILD_DIR}/benchtests/bench-memcmp" CXX=; then
+        log "ERROR: glibc memcpy and memcmp benchtest build failed"
         return 40
-    }
+    fi
     local bench_name
     for bench_name in "${GLIBC_BENCHMARKS[@]}"; do
         if [[ ! -x "${BUILD_DIR}/benchtests/${bench_name}" ]]; then

@@ -83,6 +83,21 @@ def test_missing_public_function_is_rejected(tmp_path):
         PARSER.extract_metrics(tmp_path)
 
 
+def test_memcpy_page_size_duplicate_uses_first_sweep_result(tmp_path):
+    write_output(tmp_path, "memcpy")
+    write_output(tmp_path, "memcmp")
+    path = tmp_path / "bench-memcpy.out"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    duplicate = dict(payload["functions"]["memcpy"]["results"][1])
+    duplicate["timings"] = [90.0, 999.0]
+    payload["functions"]["memcpy"]["results"].append(duplicate)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    metric = PARSER.extract_metrics(tmp_path)["memcpy.length=4096.align1=0.align2=0"]
+    assert metric["value"] == 4.0
+    assert metric["source_field"] == "functions.memcpy.results[1].timings[1]"
+
+
 def test_memcmp_requires_equal_input_marker(tmp_path):
     write_output(tmp_path, "memcpy")
     write_output(tmp_path, "memcmp")
@@ -90,5 +105,5 @@ def test_memcmp_requires_equal_input_marker(tmp_path):
     payload = json.loads(path.read_text(encoding="utf-8"))
     del payload["functions"]["memcmp"]["results"][0]["expected_result"]
     path.write_text(json.dumps(payload), encoding="utf-8")
-    with pytest.raises(ValueError, match="exactly one"):
+    with pytest.raises(ValueError, match="has no"):
         PARSER.extract_metrics(tmp_path)

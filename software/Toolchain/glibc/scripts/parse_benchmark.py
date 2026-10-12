@@ -51,11 +51,13 @@ def extract_metrics(directory: Path) -> dict[str, Any]:
                 if isinstance(row, dict)
                 and all(row.get(key) == value for key, value in scenario.items())
             ]
-            if len(matches) != 1:
+            if not matches:
                 raise ValueError(
-                    f"{source_file} must contain exactly one {scenario} scenario; "
-                    f"found {len(matches)}"
+                    f"{source_file} has no {scenario} scenario"
                 )
+            # memcpy repeats the page-size case after its power-of-two sweep.
+            # The first matching row always belongs to the common sweep on
+            # both architectures, regardless of the host page size.
             row_index, row = matches[0]
             timings = row.get("timings")
             if not isinstance(timings, list) or len(timings) != len(benchmark["ifuncs"]):
@@ -108,7 +110,7 @@ def main() -> int:
         "architecture": os.environ["EXPECTED_ARCH"],
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "parameters": {
-            "build_command": ["make", "bench-build", "BENCHSET=string-benchset"],
+            "build_targets": ["bench-timing-type", "bench-memcpy", "bench-memcmp"],
             "run_commands": ["bench-memcpy", "bench-memcmp"],
             "timing_backend": "clock_gettime(CLOCK_MONOTONIC)",
             "benchtest_patch": "scripts/glibc-2.31-benchtests.patch",

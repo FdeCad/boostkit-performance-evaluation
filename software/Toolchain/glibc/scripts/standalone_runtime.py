@@ -160,7 +160,7 @@ def record_build_info(
             "source_tarball": f"glibc-{requested_version}.tar.xz",
             "build_command": (
                 "configure --prefix=<install> --disable-werror CC=gcc CFLAGS=-O3 && "
-                "make -j$(nproc)"
+                "GNU Make 4.3 -j$(nproc) CXX= && make install cross-compiling=yes CXX="
             ),
             "benchset": benchset.split(),
             "timing_backend": "clock_gettime(CLOCK_MONOTONIC), ns",
@@ -252,7 +252,7 @@ def render_report(result: dict[str, Any]) -> str:
         ("源码仓库", "source_url"),
         ("源码包", "source_tarball"),
         ("构建方式", "build_command"),
-        ("Benchset", "benchset"),
+        ("基准程序", "benchset"),
         ("计时后端", "timing_backend"),
         ("基准补丁", "benchtest_patch"),
         ("构建编译器 (gcc)", "gcc_version"),

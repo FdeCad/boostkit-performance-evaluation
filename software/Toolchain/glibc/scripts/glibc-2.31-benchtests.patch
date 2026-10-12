@@ -1,10 +1,10 @@
 --- a/benchtests/bench-timing.h
 +++ b/benchtests/bench-timing.h
-@@ -17,20 +17,23 @@
+@@ -17,20 +17,25 @@
     <https://www.gnu.org/licenses/>.  */
  
--#undef attribute_hidden
--#define attribute_hidden
+ #undef attribute_hidden
+ #define attribute_hidden
 -#define __clock_gettime clock_gettime
 -#include <hp-timing.h>
  #include <stdint.h>

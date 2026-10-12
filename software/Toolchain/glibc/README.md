@@ -10,18 +10,21 @@
 9246fe44f68feeec8c666bb87973d590ce0137cca145df014c72ec95be9ffd17
 ```
 
-缺少构建命令时，脚本通过 `dnf` 安装对应系统包。源码、构建目录和安装前缀分别为本次 `PERF_WORK_DIR` 下的 `glibc-src`、`glibc-build`、`glibc-install`。主要命令是：
+glibc 2.31 使用系统 GNU Make 4.4.1 时可能在 `stdio-common/others` 反复重执行。脚本优先读取 `/home/runner/software/glibc/make-4.3.tar.gz`，没有则从 [GNU 官方目录](https://ftp.gnu.org/gnu/make/)下载；校验 SHA-256 `e05fdde47c5f7ca45cb697e973894ff4f5d79e13b750ed57d7b66d8defc78e19` 后，将 GNU Make 4.3 构建到本次 `PERF_WORK_DIR/make-4.3-install`。glibc 的构建、安装和 benchtest 阶段均优先使用这个私有 `make`，不替换系统命令。参见 [glibc 官方问题记录](https://sourceware.org/pipermail/glibc-bugs/2024-February/056404.html)。
+
+缺少构建命令时，脚本通过 `dnf` 安装对应系统包。glibc 源码、构建目录和安装前缀分别为本次 `PERF_WORK_DIR` 下的 `glibc-src`、`glibc-build`、`glibc-install`。主要命令是：
 
 ```bash
 cd "$PERF_WORK_DIR/glibc-build"
+export PATH="$PERF_WORK_DIR/make-4.3-install/bin:$PATH"
 ../glibc-src/configure \
   --prefix="$PERF_WORK_DIR/glibc-install" \
   --disable-werror CC=gcc CFLAGS=-O3
-make -j"$(nproc)"
-make install cross-compiling=yes
+make -j"$(nproc)" CXX=
+make install cross-compiling=yes CXX=
 ```
 
-安装命令不会更新 Runner 的系统动态链接器缓存。脚本用本次构建的 `elf/ldconfig --version` 和隔离前缀中的动态加载器校验结果。指导文档中的 `--enable-benchtests` 不属于 glibc 2.31 的配置选项；这一版用 `make bench-build` 构建官方基准程序。
+`CXX=` 让 glibc 2.31 使用其自带的 C 版构建辅助程序，避免链接 Runner 上需要更新 glibc 符号的 `libstdc++`；被测 `memcpy`、`memcmp` 的实现不变。安装命令不会更新 Runner 的系统动态链接器缓存。脚本用本次构建的 `elf/ldconfig --version` 和隔离前缀中的动态加载器校验结果。指导文档中的 `--enable-benchtests` 不属于 glibc 2.31 的配置选项。
 
 ## 计时与测试
 
@@ -34,13 +37,17 @@ glibc 2.31 原始 benchtests 在 x86_64 使用 TSC 计数，在 aarch64 使用�
 补丁仅修改基准程序，不修改被测 glibc 函数实现。两架构都必须输出 `clock_gettime_ns` 计时标记，否则测试失败。
 
 ```bash
+make -C "$PERF_WORK_DIR/glibc-src/benchtests" \
+  objdir="$PERF_WORK_DIR/glibc-build" \
+  "$PERF_WORK_DIR/glibc-build/benchtests/bench-timing-type" \
+  "$PERF_WORK_DIR/glibc-build/benchtests/bench-memcpy" \
+  "$PERF_WORK_DIR/glibc-build/benchtests/bench-memcmp" CXX=
 cd "$PERF_WORK_DIR/glibc-build"
-make bench-build BENCHSET=string-benchset
 ./benchtests/bench-memcpy > /path/to/results/benchtests/bench-memcpy.out
 ./benchtests/bench-memcmp > /path/to/results/benchtests/bench-memcmp.out
 ```
 
-`bench-build` 会构建 2.31 的字符串基准程序，但只运行上述两个。性能结果选取两者共同具备的固定场景：长度 2048、4096 字节，两个地址都按 0 偏移对齐；`memcmp` 使用相等输入。报告按 `memcpy`、`memcmp` 分组，各有两项 ns/调用指标，越小越好。原始 JSON 包含官方程序输出的其余输入场景和实现，保留在 `benchtests/`。
+只构建、运行上述两个官方基准程序，不生成无关字符串基准或 locale。性能结果选取两者共同具备的固定场景：长度 2048、4096 字节，两个地址都按 0 偏移对齐；`memcmp` 使用相等输入。报告按 `memcpy`、`memcmp` 分组，各有两项 ns/调用指标，越小越好。原始 JSON 包含官方程序输出的其余输入场景和实现，保留在 `benchtests/`。
 
 直接执行完整流程：
 
