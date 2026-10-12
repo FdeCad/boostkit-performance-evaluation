@@ -226,6 +226,7 @@ build_protobuf() {
         -DCMAKE_BUILD_TYPE=Release \
         -Dprotobuf_BUILD_TESTS=OFF \
         -Dprotobuf_BUILD_SHARED_LIBS=OFF \
+        -Dprotobuf_FORCE_FETCH_DEPENDENCIES=ON \
         -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}"; then
         log_message "ERROR: upstream CMake configuration failed"
         return 40

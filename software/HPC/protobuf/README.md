@@ -10,11 +10,14 @@
 git clone --branch v33.0 --depth 1 https://github.com/protocolbuffers/protobuf.git protobuf-source
 cmake -S protobuf-source -B build -DCMAKE_BUILD_TYPE=Release \
   -Dprotobuf_BUILD_TESTS=OFF -Dprotobuf_BUILD_SHARED_LIBS=OFF \
+  -Dprotobuf_FORCE_FETCH_DEPENDENCIES=ON \
   -DCMAKE_INSTALL_PREFIX=<本次任务的 install 目录>
 cmake --build build --parallel "$(nproc)"
 cmake --install build
 <本次任务的 install 目录>/bin/protoc --version
 ```
+
+`protobuf_FORCE_FETCH_DEPENDENCIES=ON` 使 Protobuf 使用上游 v33.0 锁定的 Abseil 20250512.1，而非 Runner 上可能存在的旧版 Abseil。依赖通过上游 CMake 下载、构建，并随 Protobuf 安装到本次任务私有目录；需要能访问 GitHub。
 
 测试源码优先从 `/home/runner/software/protobuf/AccLibBenchmark` 读取；也可通过脚本环境变量 `PROTOBUF_BENCHMARK_REPO` 指定已有 Git 仓库。缺失时从 GitCode 克隆，随后检出上述固定提交。私有构建还从 [Google Benchmark](https://github.com/google/benchmark) 获取 `v1.8.3` 并安装在本次任务目录。
 
