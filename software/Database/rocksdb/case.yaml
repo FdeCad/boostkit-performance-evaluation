@@ -2,10 +2,11 @@ name: rocksdb
 category: Database
 enabled: true
 versions:
-  - "11.8.1"
+  - "6.26.1"
 test_tools:
-  db_bench:
-    version: "RocksDB 11.8.1"
+  YCSB:
+    version: "0.18.0-SNAPSHOT"
+    revision: 19e885f7cb780fdded0547853f7810a150554caf
 execution:
   type: shell-functions
   stages:
@@ -21,10 +22,10 @@ execution:
     stop:
       script: rocksdb_test.sh
       function: cleanup_rocksdb_benchmark_data
-  timeout_minutes: 180
+  timeout_minutes: 1440
 outputs:
-  db_bench_raw_output:
-    path: db_bench_raw.log
+  ycsb_raw_output:
+    path: ycsb_raw.log
     stage: test
     format: text
     required: true
