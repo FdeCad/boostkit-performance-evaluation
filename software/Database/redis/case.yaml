@@ -2,9 +2,7 @@ name: redis
 category: Database
 enabled: true
 versions:
-  - "7.4.10"
-  - "8.0.0"
-  - "8.0.6"
+  - "7.0.15"
 test_tools:
   redis-benchmark:
     version: "与被测软件版本一致"

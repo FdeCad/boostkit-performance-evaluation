@@ -5,7 +5,7 @@ Redis 自带的 `redis-benchmark` 测试 40、60、80 三档并发下的 SET/GET
 Framework 通过 `case.yaml` 调用 `redis_test.sh` 的 `build`、`start`、`test`、
 `stop` 四个阶段；直接执行入口脚本会使用同一套构建、测试、信息收集和清理流程。
 
-当前清单支持 `7.4.10`、`8.0.0`、`8.0.6`，独立入口默认版本为 `8.0.6`。
+当前测试版本为 `7.0.15`，独立入口也默认使用该版本。
 
 ## 构建与安装
 
@@ -16,7 +16,7 @@ Redis 从官方 GitHub 标签浅克隆，在任务隔离工作目录中编译，
 当前实际构建命令为：
 
 ```bash
-git clone --branch 8.0.6 --depth 1 https://github.com/redis/redis.git redis-source
+git clone --branch 7.0.15 --depth 1 https://github.com/redis/redis.git redis-source
 cd redis-source
 make -j"$(nproc)" BUILD_TLS=no
 ```
@@ -113,8 +113,8 @@ GET 吞吐摘要、吞吐为非正数，或命令执行失败，测试都直接�
 
 ```bash
 bash software/Database/redis/redis_test.sh \
-  --version 8.0.6 \
-  --results-dir /home/runner/boostkit-perf/redis/results/8.0.6
+  --version 7.0.15 \
+  --results-dir /home/runner/boostkit-perf/redis/results/7.0.15
 ```
 
 独立执行会依次完成环境采集、构建、启动、测试、停止、结果校验和单架构报告生成。

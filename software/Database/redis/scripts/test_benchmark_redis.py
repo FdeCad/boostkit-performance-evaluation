@@ -43,16 +43,16 @@ def test_standalone_metrics_keep_clients_and_operations_separate() -> None:
     benchmark = {
         "benchmark": "redis_single_instance_set_get_throughput",
         "software": "redis",
-        "version": "8.0.6",
+        "version": "7.0.15",
         "architecture": "x86_64",
         "results": parse_throughput_results(sample_output()),
     }
-    metrics = extract_metrics(benchmark, "8.0.6", "x86_64")
+    metrics = extract_metrics(benchmark, "7.0.15", "x86_64")
     assert len(metrics) == 6
     assert metrics["40 clients SET: requests per second"]["group"] == "40 clients"
 
     report = render_report({
-        "version": "8.0.6",
+        "version": "7.0.15",
         "run_id": "test-run",
         "architecture": "x86_64",
         "status": "passed",
@@ -115,7 +115,7 @@ def test_main_resets_only_its_private_instance_and_saves_six_results(
         "benchmark_redis.py", str(benchmark), str(raw_output), str(normalized_output)
     ])
     monkeypatch.setenv("REDIS_SERVICE_PORT", "30000")
-    monkeypatch.setenv("SOFTWARE_VERSION", "8.0.6")
+    monkeypatch.setenv("SOFTWARE_VERSION", "7.0.15")
     monkeypatch.setenv("EXPECTED_ARCH", "x86_64")
 
     assert benchmark_module.main() == 0
