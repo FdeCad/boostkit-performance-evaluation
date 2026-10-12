@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from benchmark_redis import CLIENT_COUNTS, OPERATIONS
+
 
 def timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -143,32 +145,43 @@ def record_build_info(
 def extract_metrics(
     benchmark: dict[str, Any], version: str, architecture: str
 ) -> dict[str, dict[str, Any]]:
-    if benchmark.get("benchmark") != "redis_default_benchmark_with_database_blue_load":
+    if benchmark.get("benchmark") != "redis_single_instance_set_get_throughput":
         raise RuntimeError("benchmark_redis.json has an invalid benchmark identity")
     if benchmark.get("software") != "redis":
         raise RuntimeError("benchmark_redis.json has an invalid software identity")
     if benchmark.get("version") != version or benchmark.get("architecture") != architecture:
         raise RuntimeError("benchmark_redis.json identity differs from this run")
     results = benchmark.get("results")
-    if not isinstance(results, dict) or not results:
-        raise RuntimeError("benchmark_redis.json must contain default-operation results")
+    expected_keys = {
+        f"clients_{clients}_{operation.lower()}"
+        for clients in CLIENT_COUNTS
+        for operation in OPERATIONS
+    }
+    if not isinstance(results, dict) or set(results) != expected_keys:
+        raise RuntimeError("benchmark_redis.json must contain SET and GET for 40, 60, 80 clients")
 
     metrics: dict[str, dict[str, Any]] = {}
     for result_key, item in results.items():
         if not isinstance(item, dict):
             raise RuntimeError("benchmark_redis.json has an invalid result entry")
-        operation = item.get("group")
-        if not isinstance(operation, str) or not operation or result_key != operation:
-            raise RuntimeError("benchmark_redis.json result has no official operation name")
-        metric_name = f"{operation}: requests per second"
+        clients = item.get("clients")
+        operation = item.get("operation")
+        if (
+            clients not in CLIENT_COUNTS
+            or operation not in OPERATIONS
+            or result_key != f"clients_{clients}_{operation.lower()}"
+            or item.get("group") != f"{clients} clients"
+        ):
+            raise RuntimeError("benchmark_redis.json result has invalid clients or operation")
+        metric_name = f"{clients} clients {operation}: requests per second"
         if metric_name in metrics or item.get("source_name") != metric_name:
-            raise RuntimeError(f"{operation} metric name is not the documented source name")
+            raise RuntimeError(f"{metric_name} is not the documented source name")
         value = item.get("value")
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise RuntimeError(f"{operation} requests per second is not numeric")
         if not math.isfinite(float(value)) or value <= 0:
             raise RuntimeError(f"{operation} requests per second must be positive and finite")
-        if item.get("source_field") != "throughput summary: <value> requests per second":
+        if item.get("source_field") != f"{operation}: <value> requests per second":
             raise RuntimeError(f"{operation} metric source field is invalid")
         if item.get("unit") != "requests/s" or item.get("direction") != "higher_is_better":
             raise RuntimeError(f"{operation} metric contract is invalid")
@@ -176,7 +189,7 @@ def extract_metrics(
             "value": value,
             "unit": "requests/s",
             "direction": "higher_is_better",
-            "group": operation,
+            "group": f"{clients} clients",
         }
     return metrics
 
@@ -221,14 +234,16 @@ def render_report(result: dict[str, Any]) -> str:
     ):
         lines.append(f"| {label} | {markdown_cell(result['system_info'].get(field))} |")
     lines.extend(["", "## 性能指标"])
-    for metric_name, metric in result["metrics"].items():
-        operation = metric["group"]
+    for clients in CLIENT_COUNTS:
         lines.extend([
-            "", f"### {operation}", "",
-            "| 指标 | 数值 | 单位 | 优化方向 |", "|---|---:|---|---|",
-            f"| {metric_name} | {metric['value']} | "
-            f"{metric['unit']} | 越大越好 |",
+            "", f"### {clients} 并发", "",
+            "| 操作 | requests per second | 优化方向 |", "|---|---:|---|",
         ])
+        for operation in OPERATIONS:
+            metric_name = f"{clients} clients {operation}: requests per second"
+            metric = result["metrics"].get(metric_name)
+            if metric:
+                lines.append(f"| {operation} | {metric['value']} | 越大越好 |")
     if result.get("error"):
         lines.extend(["", "## 错误", "", markdown_cell(result["error"])])
     lines.append("")

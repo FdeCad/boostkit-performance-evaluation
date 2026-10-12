@@ -241,7 +241,7 @@ run_redis_benchmarks() {
         "${REDIS_BENCHMARK_BIN}" \
         "${RESULTS_DIR}/redis_benchmark_raw.log" \
         "${RESULTS_DIR}/benchmark_redis.json"; then
-        log "ERROR: database_blue-style Redis benchmark failed"
+        log "ERROR: Redis SET/GET throughput benchmark failed"
         return 50
     fi
 }
@@ -411,7 +411,7 @@ usage() {
     cat <<USAGE
 Usage: $(basename "$0") [OPTIONS]
 
-Build Redis, start an isolated service, run the database_blue-style SET/GET
+Build Redis, start an isolated service, run 40/60/80-client SET/GET
 benchmark, collect the environment and report, then clean this run's data.
 
 Options:
