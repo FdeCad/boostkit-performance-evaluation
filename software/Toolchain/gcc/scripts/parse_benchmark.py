@@ -107,15 +107,6 @@ def main() -> int:
         "architecture": architecture,
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "parameters": {
-            "command": [
-                "runcpu",
-                f"--config={config_name}",
-                "intrate",
-                "-n",
-                "1",
-                "-C",
-                str(copies),
-            ],
             "suite": "SPEC CPU2017 intrate",
             "copies": copies,
             "iterations": 1,
@@ -129,6 +120,8 @@ def main() -> int:
         },
         "runtime_context": {
             "gcc_version_string": os.environ.get("GCC_VERSION_STRING", ""),
+            "spec_config_name": config_name,
+            "command": ["runcpu", f"--config={config_name}", "intrate", "-n", "1", "-C", str(copies)],
         },
         "results": {
             result_name: {
