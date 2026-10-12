@@ -2,20 +2,18 @@
 # MySQL performance case (official prebuilt binary deployment).
 #
 # The software under test is fetched from the official MySQL 8.0 "Linux -
-# Generic" prebuilt tarball and unpacked into a per-version directory — the
-# distribution package manager only ships one version and cannot switch between
-# 8.0.x releases.  The database_blue Sysbench driver is built in this case's
-# isolated work directory during the test stage.
+# Generic" prebuilt tarball and unpacked into a private directory.  The
+# upstream Sysbench client is built in that directory during the test stage.
 #
 # The four framework stages map to: fetch+verify the tarball (build), launch a
-# throwaway instance from it (start), run the original database_blue Sysbench
-# suite (test), and tear that instance down (stop).
+# throwaway instance from it (start), run the single-instance Sysbench suite
+# (test), and tear that instance down (stop).
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOFTWARE_NAME="mysql"
-SOFTWARE_VERSION="${SOFTWARE_VERSION:-8.0.46}"
+SOFTWARE_VERSION="${SOFTWARE_VERSION:-8.0.43}"
 EXPECTED_ARCH="${EXPECTED_ARCH:-$(uname -m)}"
 PERF_RUN_ID="${PERF_RUN_ID:-}"
 RESULTS_DIR="${RESULTS_DIR:-}"
@@ -33,10 +31,6 @@ MYSQL_DB_USER="${MYSQL_DB_USER:-root}"
 MYSQL_PASSWORD="${MYSQL_PASSWORD:-}"
 MYSQL_DATA_ROOT="${MYSQL_DATA_ROOT:-}"
 
-# Fixed source for the original database_blue client test scripts.
-DATABASE_BLUE_REPOSITORY="${DATABASE_BLUE_REPOSITORY:-https://gitcode.com/mwx5319395/database_blue.git}"
-DATABASE_BLUE_COMMIT="${DATABASE_BLUE_COMMIT:-af4759227538961f0b0bed5ffc25434d65e7456b}"
-
 # Lifecycle paths (assigned in configure_runtime_paths).
 MYSQL_BASE_DIR=""
 MYSQLD_BIN=""
@@ -48,6 +42,8 @@ SOCKET_PATH=""
 PID_FILE=""
 ERR_LOG=""
 MYSQL_TMP_DIR=""
+MYSQL_SNAPSHOT_DIR=""
+SYSBENCH_BIN=""
 
 log() {
     printf '[mysql] %s\n' "$*"
@@ -95,6 +91,8 @@ configure_runtime_paths() {
     PID_FILE="${SERVICE_DIR}/mysql.pid"
     ERR_LOG="${SERVICE_DIR}/mysql.err"
     MYSQL_TMP_DIR="${SERVICE_DIR}/tmp"
+    MYSQL_SNAPSHOT_DIR="${PERF_WORK_DIR}/mysql-data-snapshot"
+    SYSBENCH_BIN="${PERF_WORK_DIR}/sysbench-tools/sysbench-1.0.17/src/sysbench"
     TMPDIR="${MYSQL_TMP_DIR}"
     export SOFTWARE_VERSION EXPECTED_ARCH PERF_RUN_ID RESULTS_DIR PERF_WORK_DIR
     export PERF_ACTUAL_VERSION_FILE TMPDIR
@@ -135,15 +133,15 @@ fetch_mysql_archive() {
     # checksum.  Adding a version means adding its two architecture entries
     # here; the download, extraction, and lifecycle logic remains unchanged.
     case "${SOFTWARE_VERSION}:${EXPECTED_ARCH}" in
-        8.0.46:x86_64)
+        8.0.43:x86_64)
             release_directory="MySQL-8.0"
-            archive_name="mysql-8.0.46-linux-glibc2.28-x86_64.tar.xz"
-            archive_md5="367c6adbd976c0e4bcbe39bda4ea6ecf"
+            archive_name="mysql-8.0.43-linux-glibc2.28-x86_64.tar.xz"
+            archive_md5="9b6ef0d08e5506eab12fe2c1b619f664"
             ;;
-        8.0.46:aarch64)
+        8.0.43:aarch64)
             release_directory="MySQL-8.0"
-            archive_name="mysql-8.0.46-linux-glibc2.28-aarch64.tar.xz"
-            archive_md5="62376634565907ec31b74da3bc645b2b"
+            archive_name="mysql-8.0.43-linux-glibc2.28-aarch64.tar.xz"
+            archive_md5="c51923a9b540cd2f886734d3e0366e9a"
             ;;
         *)
             log "ERROR: no verified MySQL release is declared for ${SOFTWARE_VERSION} on ${EXPECTED_ARCH}"
@@ -209,7 +207,7 @@ require_mysql_tools() {
 
     # The MySQL binary archive needs the first group.  The remaining tools and
     # development headers are required later when this case builds the
-    # database_blue Sysbench 1.0 client from its original source.
+    # pinned upstream Sysbench client from its original source.
     for command_name in md5sum tar ldd sed tee curl git make gcc autoreconf automake libtoolize pkg-config python3 sudo; do
         if command -v "${command_name}" >/dev/null 2>&1; then
             continue
@@ -283,7 +281,7 @@ ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_PASSWORD}';
 CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '${MYSQL_PASSWORD}';
 ALTER USER 'root'@'%' IDENTIFIED BY '${MYSQL_PASSWORD}';
 GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;
-CREATE DATABASE IF NOT EXISTS sysbench;
+CREATE DATABASE IF NOT EXISTS sbtest;
 FLUSH PRIVILEGES;
 SQL
         return $?
@@ -292,7 +290,7 @@ SQL
     "${MYSQL_BIN}" --socket="${SOCKET_PATH}" -u root <<SQL
 CREATE USER IF NOT EXISTS '${MYSQL_DB_USER}'@'%' IDENTIFIED BY '${MYSQL_PASSWORD}';
 GRANT ALL PRIVILEGES ON *.* TO '${MYSQL_DB_USER}'@'%' WITH GRANT OPTION;
-CREATE DATABASE IF NOT EXISTS sysbench;
+CREATE DATABASE IF NOT EXISTS sbtest;
 FLUSH PRIVILEGES;
 SQL
 }
@@ -336,7 +334,6 @@ build_mysql() {
 }
 
 start_mysql_service() {
-    local attempt
     local mysqld_user
     initialize_runtime || return $?
     if [[ ! -x "${MYSQLD_BIN}" || ! -x "${MYSQL_BIN}" ]]; then
@@ -370,32 +367,8 @@ start_mysql_service() {
         return 40
     }
 
-    "${MYSQLD_BIN}" --no-defaults --daemonize \
-        --basedir="${MYSQL_BASE_DIR}" \
-        --datadir="${DATADIR}" \
-        --tmpdir="${MYSQL_TMP_DIR}" \
-        --user="${mysqld_user}" \
-        --socket="${SOCKET_PATH}" \
-        --pid-file="${PID_FILE}" \
-        --port="${MYSQL_PORT}" \
-        --bind-address="${MYSQL_HOST}" \
-        --max-connections=2048 \
-        --log-error="${ERR_LOG}" || {
-        log "ERROR: failed to launch mysqld (see ${ERR_LOG})"
-        return 40
-    }
+    launch_mysql_server prepare || return $?
 
-    for attempt in {1..60}; do
-        if "${MYSQL_BIN}" --socket="${SOCKET_PATH}" -u root -N -e "SELECT 1" >/dev/null 2>&1; then
-            log "mysqld is ready on port ${MYSQL_PORT} (socket ${SOCKET_PATH})"
-            break
-        fi
-        sleep 1
-    done
-    if ! "${MYSQL_BIN}" --socket="${SOCKET_PATH}" -u root -N -e "SELECT 1" >/dev/null 2>&1; then
-        log "ERROR: mysqld did not become ready (see ${ERR_LOG})"
-        return 40
-    fi
     configure_benchmark_account || {
         log "ERROR: failed to configure benchmark account"
         return 40
@@ -407,116 +380,191 @@ start_mysql_service() {
         log "ERROR: benchmark account is not reachable over TCP"
         return 40
     fi
-    log "MySQL service is ready for benchmarking"
+    log "MySQL service is ready for data preparation"
+}
+
+launch_mysql_server() {
+    local mode="$1"
+    local attempt
+    local -a mode_options
+
+    case "${mode}" in
+        prepare)
+            mode_options=(
+                --innodb-flush-log-at-trx-commit=0
+                --innodb-use-native-aio=OFF
+                --skip-log-bin
+            )
+            ;;
+        benchmark)
+            mode_options=(
+                --innodb-flush-log-at-trx-commit=1
+                --innodb-use-native-aio=ON
+                --log-bin="${DATADIR}/mysql-bin"
+            )
+            ;;
+        *)
+            log "ERROR: unsupported MySQL service mode: ${mode}"
+            return 40
+            ;;
+    esac
+
+    "${MYSQLD_BIN}" --no-defaults --daemonize \
+        --basedir="${MYSQL_BASE_DIR}" \
+        --datadir="${DATADIR}" \
+        --tmpdir="${MYSQL_TMP_DIR}" \
+        --user="$(id -un)" \
+        --socket="${SOCKET_PATH}" \
+        --pid-file="${PID_FILE}" \
+        --port="${MYSQL_PORT}" \
+        --bind-address="${MYSQL_HOST}" \
+        --max-connections=2048 \
+        --log-error="${ERR_LOG}" \
+        "${mode_options[@]}" || {
+        log "ERROR: failed to launch mysqld (see ${ERR_LOG})"
+        return 40
+    }
+
+    for attempt in {1..60}; do
+        if "${MYSQLADMIN_BIN}" --socket="${SOCKET_PATH}" -u root ping >/dev/null 2>&1; then
+            log "mysqld is ready on port ${MYSQL_PORT} (socket ${SOCKET_PATH})"
+            return 0
+        fi
+        sleep 1
+    done
+    log "ERROR: mysqld did not become ready (see ${ERR_LOG})"
+    return 40
+}
+
+shutdown_mysql_server() {
+    local attempt
+
+    if [[ ! -S "${SOCKET_PATH}" ]]; then
+        return 0
+    fi
+    if ! MYSQL_PWD="${MYSQL_PASSWORD}" "${MYSQLADMIN_BIN}" \
+        --socket="${SOCKET_PATH}" -u root shutdown; then
+        log "ERROR: failed to shut down managed MySQL instance"
+        return 50
+    fi
+    for attempt in {1..40}; do
+        if [[ ! -S "${SOCKET_PATH}" ]]; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    log "ERROR: managed MySQL socket is still present after shutdown"
+    return 50
+}
+
+run_sysbench() {
+    local workload="$1" threads="$2" duration="$3" label="$4"
+    local raw_output="${RESULTS_DIR}/sysbench_raw.log"
+    local run_output="${RESULTS_DIR}/sysbench-runs/${label}.log"
+    local action=run
+    local -a command=(
+        "${SYSBENCH_BIN}" --db-driver=mysql
+        "--mysql-host=${MYSQL_HOST}" "--mysql-port=${MYSQL_PORT}"
+        "--mysql-user=${MYSQL_DB_USER}" "--mysql-password=${MYSQL_PASSWORD}"
+        --mysql-db=sbtest --table_size=10000000 --tables=64
+        "--threads=${threads}" "--percentile=95" --report-interval=1
+    )
+
+    if [[ "${duration}" -gt 0 ]]; then
+        command+=("--time=${duration}")
+    fi
+    if [[ "${label}" == prepare ]]; then
+        action=prepare
+    fi
+    command+=("oltp_${workload}" "${action}")
+    printf '# %s: oltp_%s %s, threads=%s, time=%s\n' \
+        "${label}" "${workload}" "${action}" "${threads}" "${duration}" | tee -a "${raw_output}" "${run_output}"
+    if ! "${command[@]}" 2>&1 | tee -a "${raw_output}" "${run_output}"; then
+        log "ERROR: Sysbench ${label} failed"
+        return 50
+    fi
 }
 
 run_mysql_benchmarks() {
-    local database_blue_dir database_blue_suite_dir database_blue_tools_dir
-    local raw_output report_directory suite_start_time
+    local scenario threads snapshot_bytes available_bytes
+    local -a threads_for_scenario
+    local raw_output="${RESULTS_DIR}/sysbench_raw.log"
+    local runs_dir="${RESULTS_DIR}/sysbench-runs"
 
     initialize_runtime || return $?
     require_mysql_tools || return $?
     if ! MYSQL_PWD="${MYSQL_PASSWORD}" "${MYSQL_BIN}" \
-        "-h${MYSQL_HOST}" "-P${MYSQL_PORT}" "-u${MYSQL_DB_USER}" -N -e "SELECT 1" \
+        "-h${MYSQL_HOST}" "-P${MYSQL_PORT}" "-u${MYSQL_DB_USER}" -N -e 'SELECT 1' \
         >/dev/null 2>&1; then
         log "ERROR: MySQL is not reachable on ${MYSQL_HOST}:${MYSQL_PORT}"
         return 50
     fi
-    database_blue_dir="${PERF_WORK_DIR}/database_blue"
-    database_blue_suite_dir="${database_blue_dir}/resources/database/client/script/sysbench_mysql_1.0"
-    database_blue_tools_dir="${PERF_WORK_DIR}/database-blue-tools"
-    raw_output="${RESULTS_DIR}/database_blue_sysbench_raw.log"
-    report_directory="${database_blue_tools_dir}/report"
-    rm -rf "${database_blue_dir}"
-    log "cloning database_blue at ${DATABASE_BLUE_COMMIT}"
-    if ! git clone --quiet "${DATABASE_BLUE_REPOSITORY}" "${database_blue_dir}"; then
-        log "ERROR: failed to clone database_blue from ${DATABASE_BLUE_REPOSITORY}"
+    if ! bash "${SCRIPT_DIR}/scripts/prepare_sysbench.sh" \
+        "${PERF_WORK_DIR}/sysbench-tools" "${MYSQL_BASE_DIR}/bin/mysql_config"; then
+        log "ERROR: failed to build pinned Sysbench client"
         return 50
     fi
-    if ! git -C "${database_blue_dir}" checkout --quiet --detach "${DATABASE_BLUE_COMMIT}"; then
-        log "ERROR: database_blue commit is unavailable: ${DATABASE_BLUE_COMMIT}"
-        return 50
-    fi
-    if ! bash "${SCRIPT_DIR}/scripts/prepare_database_blue_tools.sh" \
-        "${database_blue_tools_dir}" \
-        "${MYSQL_BASE_DIR}/bin/mysql_config"; then
-        log "ERROR: failed to prepare database_blue Sysbench tools"
-        return 50
-    fi
-    if [[ ! -d "${database_blue_suite_dir}" ]]; then
-        log "ERROR: database_blue Sysbench 1.0 suite is missing: ${database_blue_suite_dir}"
-        return 50
-    fi
-    while IFS= read -r -d '' script_path; do
-        if ! sed -i \
-            -e "s|/home/automation/client/soft/sysbench-1.0.17|${database_blue_tools_dir}/sysbench-1.0.17|g" \
-            -e "s|/tmp/dataCollection/dataCollect.sh|${database_blue_tools_dir}/data-collection/dataCollect.sh|g" \
-            -e "s|/home/automation/client/report/sysbench|${report_directory}|g" \
-            "${script_path}"; then
-            log "ERROR: failed to redirect database_blue working paths: ${script_path}"
-            return 50
-        fi
-    done < <(find "${database_blue_suite_dir}" -type f -name '*.sh' -print0)
+    mkdir -p "${runs_dir}"
+    : > "${raw_output}"
 
-    if [[ ! "${MYSQL_HOST}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
-        log "ERROR: database_blue only accepts a hostname or IP address: ${MYSQL_HOST}"
+    MYSQL_PWD="${MYSQL_PASSWORD}" "${MYSQL_BIN}" \
+        "-h${MYSQL_HOST}" "-P${MYSQL_PORT}" "-u${MYSQL_DB_USER}" \
+        -e 'CREATE DATABASE IF NOT EXISTS sbtest' || return 50
+    log 'preparing 64 Sysbench tables with 10,000,000 rows each (256 threads)'
+    run_sysbench read_write 256 0 prepare || return 50
+
+    if [[ -e "${MYSQL_SNAPSHOT_DIR}" ]]; then
+        log "ERROR: data snapshot already exists: ${MYSQL_SNAPSHOT_DIR}"
         return 50
     fi
-    if [[ "${MYSQL_DB_USER}" != "root" ]]; then
-        log "ERROR: database_blue Sysbench scripts require MYSQL_DB_USER=root"
+    shutdown_mysql_server || return 50
+    snapshot_bytes="$(du -sb "${DATADIR}" | awk '{print $1}')"
+    available_bytes="$(df -B1 --output=avail "${PERF_WORK_DIR}" | tail -n 1 | tr -d ' ')"
+    if (( available_bytes < snapshot_bytes + 10737418240 )); then
+        log "ERROR: insufficient disk space for the private MySQL data snapshot"
         return 50
     fi
-    mkdir -p "${report_directory}"
-    suite_start_time="$(date +%s)"
-    log "running the original database_blue Sysbench 1.0 suite"
-    if ! (
-        cd "${database_blue_suite_dir}"
-        sed -i "s/^host=.*/host='${MYSQL_HOST}'/" runall.sh
-        sed -i "s/^password=.*/password='${MYSQL_PASSWORD}'/" runall.sh
-        sed -i "s/-P 3306/-P ${MYSQL_PORT}/g" runall.sh
-        sed -i \
-            's/--mysql-host=${HOST}/--mysql-host=${HOST} --mysql-port=${PORT}/' \
-            prepare.sh
-        chmod +x data_filter.sh test_oltp_*.sh
-        bash prepare.sh \
-            -h "${MYSQL_HOST}" -P "${MYSQL_PORT}" \
-            -u "${MYSQL_DB_USER}" -p "${MYSQL_PASSWORD}"
-        if ! bash runall.sh; then
-            log "WARN: database_blue runall.sh could not archive its optional normal_data.log"
+    log "copying prepared data to ${MYSQL_SNAPSHOT_DIR}"
+    cp -a --reflink=never "${DATADIR}" "${MYSQL_SNAPSHOT_DIR}" || return 50
+    launch_mysql_server benchmark || return 50
+    MYSQL_PWD="${MYSQL_PASSWORD}" "${MYSQL_BIN}" \
+        "-h${MYSQL_HOST}" "-P${MYSQL_PORT}" "-u${MYSQL_DB_USER}" -N \
+        -e 'SELECT @@innodb_flush_log_at_trx_commit, @@innodb_use_native_aio, @@log_bin, @@max_connections' \
+        | { printf '# benchmark configuration: flush_at_commit native_aio log_bin max_connections\n'; cat; } \
+        | tee -a "${raw_output}" "${RESULTS_DIR}/mysql-benchmark-config.log" || return 50
+
+    for scenario in read_only read_write write_only; do
+        if [[ "${scenario}" == read_write ]]; then
+            shutdown_mysql_server || return 50
+            launch_mysql_server benchmark || return 50
+        elif [[ "${scenario}" == write_only ]]; then
+            shutdown_mysql_server || return 50
+            rm -rf -- "${DATADIR}"
+            cp -a --reflink=never "${MYSQL_SNAPSHOT_DIR}" "${DATADIR}" || return 50
+            launch_mysql_server benchmark || return 50
         fi
-    ) 2>&1 | tee "${raw_output}"; then
-        log "ERROR: database_blue Sysbench suite failed (see ${raw_output})"
-        return 50
-    fi
-    python3 "${SCRIPT_DIR}/scripts/collect_database_blue_sysbench.py" \
-        "${report_directory}" "${suite_start_time}" "${RESULTS_DIR}/results.json" || return 50
-    log "database_blue Sysbench suite completed"
+        sleep 30
+        log "warming up ${scenario}: 64 threads for 300 seconds"
+        run_sysbench read_only 64 300 "warmup-${scenario}" || return 50
+        threads_for_scenario=(1 32 128 256)
+        for threads in "${threads_for_scenario[@]}"; do
+            log "testing ${scenario}: ${threads} threads, 120 seconds"
+            run_sysbench "${scenario}" "${threads}" 120 "run-${scenario}-threads${threads}" || return 50
+        done
+    done
+    python3 "${SCRIPT_DIR}/scripts/collect_sysbench.py" \
+        "${runs_dir}" "${RESULTS_DIR}/results.json" || return 50
+    log 'single-instance Sysbench suite completed'
 }
 
 stop_mysql_service() {
-    local attempt
     initialize_runtime || return $?
-    if [[ ! -f "${SOCKET_PATH}" ]]; then
-        log "no managed MySQL socket; nothing to stop"
-    else
-        if ! MYSQL_PWD="${MYSQL_PASSWORD}" "${MYSQLADMIN_BIN}" --socket="${SOCKET_PATH}" -u root shutdown >/dev/null 2>&1; then
-            MYSQL_PWD="${MYSQL_PASSWORD}" "${MYSQL_BIN}" --socket="${SOCKET_PATH}" -u root -N -e "SHUTDOWN" >/dev/null 2>&1 || true
-        fi
-
-        for attempt in {1..20}; do
-            if [[ -f "${PID_FILE}" ]] && ! kill -0 "$(cat "${PID_FILE}" 2>/dev/null)" 2>/dev/null; then
-                break
-            fi
-            MYSQL_PWD="${MYSQL_PASSWORD}" "${MYSQL_BIN}" --socket="${SOCKET_PATH}" -u root -N -e "SELECT 1" >/dev/null 2>&1 || break
-            sleep 0.5
-        done
-        if MYSQL_PWD="${MYSQL_PASSWORD}" "${MYSQL_BIN}" --socket="${SOCKET_PATH}" -u root -N -e "SELECT 1" >/dev/null 2>&1; then
-            log "ERROR: MySQL is still reachable on socket ${SOCKET_PATH}"
-            return 50
-        fi
-        log "MySQL service stopped"
+    shutdown_mysql_server || return 50
+    if [[ "${SERVICE_DIR}" != "${PERF_WORK_DIR}/data" || "${SERVICE_DIR}" == / || -z "${SERVICE_DIR}" ]]; then
+        log "ERROR: refusing to remove unexpected MySQL data directory: ${SERVICE_DIR}"
+        return 50
     fi
-    rm -rf "${SERVICE_DIR}"
+    rm -rf -- "${SERVICE_DIR}"
     log "MySQL runtime data removed from ${SERVICE_DIR}"
 }
 
@@ -648,8 +696,8 @@ usage() {
     cat <<USAGE
 Usage: $(basename "$0") [OPTIONS]
 
-Deploy MySQL 8.0.x from the official prebuilt tarball and run sysbench OLTP and
-micro benchmarks as a standalone performance evaluation.
+Deploy MySQL 8.0.x from the official prebuilt tarball and run Sysbench OLTP
+benchmarks as a standalone performance evaluation.
 Results default to results/<version>/<run-id>/ inside this directory.
 
 Options:

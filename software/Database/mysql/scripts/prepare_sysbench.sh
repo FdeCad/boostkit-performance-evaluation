@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
-# Prepare the client-side dependencies used by database_blue's Sysbench 1.0
-# scripts. The caller updates its per-task script copy to use these paths.
+# Build the pinned upstream Sysbench client in this task's private directory.
 
 set -euo pipefail
 
 usage() {
     cat <<'USAGE'
 Usage:
-  prepare_database_blue_tools.sh WORK_DIRECTORY MYSQL_CONFIG
+  prepare_sysbench.sh WORK_DIRECTORY MYSQL_CONFIG
 
-Builds the pinned Sysbench source required by database_blue's MySQL 1.0 suite
-inside WORK_DIRECTORY.
+Builds the pinned upstream Sysbench source inside WORK_DIRECTORY.
 USAGE
 }
 
@@ -22,18 +20,14 @@ fi
 work_directory="${1%/}"
 mysql_config="${2}"
 sysbench_source_directory="${work_directory}/sysbench-1.0.17"
-data_collection_directory="${work_directory}/data-collection"
-data_collection_script="${data_collection_directory}/dataCollect.sh"
-sysbench_repository="${DATABASE_BLUE_SYSBENCH_REPOSITORY:-https://github.com/akopytov/sysbench.git}"
-sysbench_ref="${DATABASE_BLUE_SYSBENCH_REF:-1.0.17}"
-sysbench_commit="${DATABASE_BLUE_SYSBENCH_COMMIT:-d634bce}"
+sysbench_repository="https://github.com/akopytov/sysbench.git"
+sysbench_ref="1.0.17"
+sysbench_commit="d634bce"
 
 for command_name in git make gcc autoreconf libtoolize pkg-config; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
-        printf '[mysql] ERROR: database_blue Sysbench prerequisite is missing: %s\n' \
+        printf '[mysql] ERROR: Sysbench prerequisite is missing: %s\n' \
             "${command_name}" >&2
-        printf '%s\n' \
-            '[mysql] ERROR: the workflow must install the MySQL Sysbench build dependencies first' >&2
         exit 30
     fi
 done
@@ -67,17 +61,4 @@ if [[ ! -x "${sysbench_source_directory}/src/sysbench" ]]; then
     exit 40
 fi
 
-mkdir -p "${data_collection_directory}"
-cat > "${data_collection_script}" <<'EOF'
-#!/usr/bin/env bash
-# database_blue calls data_record only after a Sysbench scenario completes.
-# The public database_blue tree does not contain its original data-collection
-# implementation.  Results are retained by the framework instead, so this
-# compatibility definition intentionally has no side effects.
-data_record() {
-    return 0
-}
-EOF
-chmod 0644 "${data_collection_script}"
-
-printf '[mysql] database_blue Sysbench tools are ready\n'
+printf '[mysql] Sysbench %s is ready\n' "${sysbench_ref}"

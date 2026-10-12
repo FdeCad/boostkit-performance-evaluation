@@ -2,10 +2,8 @@ name: mysql
 category: Database
 enabled: true
 versions:
-  - "8.0.46"
+  - "8.0.43"
 test_tools:
-  database_blue:
-    version: af4759227538961f0b0bed5ffc25434d65e7456b
   sysbench:
     version: "1.0.17"
     revision: d634bce
@@ -26,8 +24,8 @@ execution:
       function: stop_mysql_service
   timeout_minutes: 600
 outputs:
-  database_blue_sysbench_output:
-    path: database_blue_sysbench_raw.log
+  sysbench_output:
+    path: sysbench_raw.log
     stage: test
     format: text
     required: true
@@ -52,5 +50,5 @@ metrics:
       column_order:
         - TPS
         - QPS
-        - transactions
-      single_note: TPS、QPS 和 transactions 均为越大越好。
+        - P95 latency
+      single_note: TPS、QPS 越大越好；P95 延迟越小越好。
