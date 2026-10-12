@@ -8,6 +8,7 @@ import json
 import math
 import os
 import platform
+import re
 import shlex
 import subprocess
 from datetime import datetime, timezone
@@ -140,7 +141,6 @@ def record_build_info(
     gcc_version: str,
     source_url: str,
     benchset: str,
-    use_clock_gettime: str,
 ) -> None:
     actual_version = actual_version_file.read_text(encoding="utf-8").strip()
     if not actual_version:
@@ -159,11 +159,12 @@ def record_build_info(
             "source_url": source_url,
             "source_tarball": f"glibc-{requested_version}.tar.xz",
             "build_command": (
-                "configure --prefix=<install> --disable-werror && "
+                "configure --prefix=<install> --disable-werror CC=gcc CFLAGS=-O3 && "
                 "make -j$(nproc)"
             ),
             "benchset": benchset.split(),
-            "use_clock_gettime": use_clock_gettime,
+            "timing_backend": "clock_gettime(CLOCK_MONOTONIC), ns",
+            "benchtest_patch": "scripts/glibc-2.31-benchtests.patch",
         },
     )
 
@@ -195,25 +196,15 @@ def extract_metrics(
         if metric_name in metrics:
             raise RuntimeError(f"duplicate glibc benchmark: {metric_name}")
         source_field = result.get("source_field")
-        is_direct_official_field = source_field in ("mean", "duration", "results[0]")
-        is_official_timing_aggregate = (
-            result.get("aggregation") == "arithmetic_mean"
-            and isinstance(source_field, str)
-            and source_field.startswith("functions.")
-            and ".results[" in source_field
-            and ".timings[" in source_field
-        )
-        is_official_allocator_field = (
+        is_direct_official_timing = (
             isinstance(source_field, str)
-            and source_field.startswith("functions.malloc.")
-            and source_field.rsplit(".", 1)[-1]
-            in ("time_per_iteration", "main_arena_st_allocs_0100_time")
+            and re.fullmatch(
+                r"functions\.(memcpy|memcmp)\.results\[\d+\]\.timings\[\d+\]",
+                source_field,
+            )
+            and result.get("implementation") in ("memcpy", "memcmp")
         )
-        if not (
-            is_direct_official_field
-            or is_official_timing_aggregate
-            or is_official_allocator_field
-        ):
+        if not is_direct_official_timing:
             raise RuntimeError(
                 f"metric {metric_name} is not sourced from an official benchtest field"
             )
@@ -262,7 +253,8 @@ def render_report(result: dict[str, Any]) -> str:
         ("源码包", "source_tarball"),
         ("构建方式", "build_command"),
         ("Benchset", "benchset"),
-        ("计时后端", "use_clock_gettime"),
+        ("计时后端", "timing_backend"),
+        ("基准补丁", "benchtest_patch"),
         ("构建编译器 (gcc)", "gcc_version"),
         ("记录时间", "recorded_at"),
     ):
@@ -382,11 +374,6 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="benchtests BENCHSET selection used by make bench",
     )
-    build.add_argument(
-        "--use-clock-gettime",
-        required=True,
-        help="USE_CLOCK_GETTIME value forcing clock_gettime (ns) timing",
-    )
     final = subparsers.add_parser("finalize")
     final.add_argument("output_dir", type=Path)
     final.add_argument("version")
@@ -416,7 +403,6 @@ def main() -> int:
             args.gcc_version,
             args.source_url,
             args.benchset,
-            args.use_clock_gettime,
         )
         return 0
     return finalize(

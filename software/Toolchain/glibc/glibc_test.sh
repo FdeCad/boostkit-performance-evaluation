@@ -9,38 +9,17 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SOFTWARE_VERSION="${SOFTWARE_VERSION:-2.44}"
+SOFTWARE_VERSION="${SOFTWARE_VERSION:-2.31}"
 EXPECTED_ARCH="${EXPECTED_ARCH:-$(uname -m)}"
 PERF_RUN_ID="${PERF_RUN_ID:-}"
 RESULTS_DIR="${RESULTS_DIR:-}"
 PERF_WORK_DIR="${PERF_WORK_DIR:-}"
 PERF_ACTUAL_VERSION_FILE="${PERF_ACTUAL_VERSION_FILE:-}"
 GLIBC_SOURCE_URL="${GLIBC_SOURCE_URL:-https://ftp.gnu.org/gnu/glibc}"
-# Official benchmark selection from glibc's benchtests/Makefile.  The suite
-# covers math inlines, stdio, stdlib, string APIs, and malloc.  The parser
-# reports only the fixed, documented scenarios declared in its metric contract;
-# all other official outputs remain available in results/benchtests.
-# USE_CLOCK_GETTIME=1 switches every benchtest to clock_gettime timing so both
-# x86_64 and aarch64 report nanoseconds instead of architecture-specific cycles.
-GLIBC_BENCHSET="${GLIBC_BENCHSET:-math-benchset stdio-benchset stdio-common-benchset stdlib-benchset string-benchset malloc-simple malloc-tcache malloc-thread}"
-GLIBC_USE_CLOCK_GETTIME=1
-# Benchtest executables required for the normalized metric contract.  Their
-# output fields are named verbatim in scripts/parse_benchmark.py.
-GLIBC_REQUIRED_BENCHMARKS=(
-    bench-math-inlines
-    bench-fclose
-    bench-sprintf
-    bench-random-lock
-    bench-memcpy
-    bench-memmove
-    bench-memset
-    bench-strlen
-    bench-strcmp
-    bench-strstr
-    bench-malloc-simple
-    bench-malloc-tcache
-    bench-malloc-thread
-)
+# glibc 2.31 only accepts benchset names at build time. Build the official
+# string benchset, then run only these two executables.
+GLIBC_BENCHSET="string-benchset"
+GLIBC_BENCHMARKS=(bench-memcpy bench-memcmp)
 SRC_DIR=""
 BUILD_DIR=""
 INSTALL_DIR=""
@@ -110,7 +89,7 @@ require_commands() {
     local required package missing=0
     local packages=()
 
-    for required in gcc make tar xz sha256sum curl python3 awk nproc bison; do
+    for required in gcc make tar xz sha256sum curl python3 awk nproc bison patch; do
         if ! command -v "${required}" >/dev/null 2>&1; then
             log "missing required command: ${required}"
             missing=1
@@ -124,6 +103,7 @@ require_commands() {
                 python3) package="python3" ;;
                 awk) package="gawk" ;;
                 bison) package="bison" ;;
+                patch) package="patch" ;;
             esac
             packages+=("${package}")
         fi
@@ -149,7 +129,7 @@ require_commands() {
         return 30
     fi
 
-    for required in gcc make tar xz sha256sum curl python3 awk nproc bison; do
+    for required in gcc make tar xz sha256sum curl python3 awk nproc bison patch; do
         if ! command -v "${required}" >/dev/null 2>&1; then
             log "ERROR: required command is still missing after installation: ${required}"
             return 30
@@ -166,11 +146,8 @@ prepare_glibc_source() {
     # The official GNU release checksums are declared beside the download
     # logic: adding a version requires adding its checksum here.
     case "${SOFTWARE_VERSION}" in
-        2.43)
-            expected_sha256="d9c86c6b5dbddb43a3e08270c5844fc5177d19442cf5b8df4be7c07cd5fa3831"
-            ;;
-        2.44)
-            expected_sha256="37f600f2bef3c5e8300147059568b2a2e40a7ad6ccc65ce942556d49429cc667"
+        2.31)
+            expected_sha256="9246fe44f68feeec8c666bb87973d590ce0137cca145df014c72ec95be9ffd17"
             ;;
         *)
             log "ERROR: no official GNU checksum is declared for glibc ${SOFTWARE_VERSION}"
@@ -212,6 +189,13 @@ prepare_glibc_source() {
         log "ERROR: failed to move the unpacked source into ${SRC_DIR}"
         return 30
     fi
+    # The upstream 2.31 benchtests use TSC ticks on x86_64 and nanoseconds
+    # on aarch64. Apply the same measurement-only changes to both builds.
+    if ! patch --batch --forward --fuzz=0 -l -p1 -d "${SRC_DIR}" \
+        -i "${SCRIPT_DIR}/scripts/glibc-2.31-benchtests.patch"; then
+        log "ERROR: failed to apply the glibc 2.31 benchtest measurement patch"
+        return 30
+    fi
     if [[ "${tarball}" == "${PERF_WORK_DIR}/"* ]]; then
         rm -f "${tarball}"
     fi
@@ -237,7 +221,8 @@ build_glibc() {
         unset LD_LIBRARY_PATH
         "${SRC_DIR}/configure" \
             --prefix="${INSTALL_DIR}" \
-            --disable-werror
+            --disable-werror \
+            CC=gcc CFLAGS=-O3
     ) || {
         log "ERROR: glibc configure failed"
         return 40
@@ -277,7 +262,7 @@ build_glibc() {
         log "ERROR: built ldconfig cannot report its version"
         return 40
     fi
-    # Output format: "ldconfig (GNU libc) 2.44".
+    # Output format: "ldconfig (GNU libc) 2.31".
     actual_version="$(printf '%s\n' "${version_output}" | awk '{print $NF}')"
     if [[ "${actual_version}" != "${SOFTWARE_VERSION}" ]]; then
         log "ERROR: built glibc reports ${actual_version}, requested ${SOFTWARE_VERSION}"
@@ -298,19 +283,16 @@ start_glibc_runtime() {
         log "ERROR: glibc is not built; run the build stage first"
         return 40
     fi
-    log "building official benchtests for benchset: ${GLIBC_BENCHSET}"
-    log "timing: USE_CLOCK_GETTIME=${GLIBC_USE_CLOCK_GETTIME} (clock_gettime, ns on all architectures)"
+    log "building glibc 2.31 ${GLIBC_BENCHSET} for memcpy and memcmp"
     (
         cd "${BUILD_DIR}"
-        make bench-build \
-            BENCHSET="${GLIBC_BENCHSET}" \
-            USE_CLOCK_GETTIME="${GLIBC_USE_CLOCK_GETTIME}"
+        make bench-build BENCHSET="${GLIBC_BENCHSET}"
     ) || {
         log "ERROR: glibc bench-build failed"
         return 40
     }
     local bench_name
-    for bench_name in "${GLIBC_REQUIRED_BENCHMARKS[@]}"; do
+    for bench_name in "${GLIBC_BENCHMARKS[@]}"; do
         if [[ ! -x "${BUILD_DIR}/benchtests/${bench_name}" ]]; then
             log "ERROR: benchtest binary is missing: ${BUILD_DIR}/benchtests/${bench_name}"
             return 40
@@ -318,6 +300,10 @@ start_glibc_runtime() {
     done
     if ! TIMING_TYPE_OUTPUT="$("${BUILD_DIR}/benchtests/bench-timing-type")"; then
         log "ERROR: bench-timing-type is not runnable"
+        return 40
+    fi
+    if [[ "${TIMING_TYPE_OUTPUT}" != "clock_gettime_ns" ]]; then
+        log "ERROR: benchtests use unexpected timing backend: ${TIMING_TYPE_OUTPUT}"
         return 40
     fi
     log "benchtests report timing backend: ${TIMING_TYPE_OUTPUT}"
@@ -338,56 +324,28 @@ run_glibc_benchmarks() {
         log "ERROR: bench-timing-type is not runnable"
         return 50
     fi
-    log "running official benchtests with make bench (BENCHSET=\"${GLIBC_BENCHSET}\" USE_CLOCK_GETTIME=${GLIBC_USE_CLOCK_GETTIME})"
-    if ! (
-        cd "${BUILD_DIR}"
-        make bench \
-            BENCHSET="${GLIBC_BENCHSET}" \
-            USE_CLOCK_GETTIME="${GLIBC_USE_CLOCK_GETTIME}"
-    ) 2>&1 | tee "${RESULTS_DIR}/benchmark_bench.txt"; then
-        log "ERROR: glibc make bench run failed"
-        return 50
-    fi
-    if [[ ! -s "${RESULTS_DIR}/benchmark_bench.txt" ]]; then
-        log "ERROR: make bench output is empty: ${RESULTS_DIR}/benchmark_bench.txt"
+    if [[ "${TIMING_TYPE_OUTPUT}" != "clock_gettime_ns" ]]; then
+        log "ERROR: benchtests use unexpected timing backend: ${TIMING_TYPE_OUTPUT}"
         return 50
     fi
     mkdir -p "${RESULTS_DIR}/benchtests"
-    local output_path
-    local raw_output_paths=()
-    shopt -s nullglob
-    raw_output_paths=(
-        "${BUILD_DIR}/benchtests"/bench-*.out
-        "${BUILD_DIR}/benchtests"/bench.out
-    )
-    shopt -u nullglob
-    if [[ "${#raw_output_paths[@]}" -eq 0 ]]; then
-        log "ERROR: make bench produced no raw benchtest outputs"
-        return 50
-    fi
-    local saved_output_count=0
-    for output_path in "${raw_output_paths[@]}"; do
-        if [[ ! -s "${output_path}" ]]; then
-            # glibc creates bench.out for the bench-func group even when this
-            # BENCHSET does not select that group.  It is then an empty
-            # placeholder, not a failed benchmark.  Required parsed outputs
-            # remain checked by parse_benchmark.py below.
-            log "skipping empty optional benchtest output: ${output_path}"
-            continue
-        fi
-        if ! cp "${output_path}" "${RESULTS_DIR}/benchtests/"; then
-            log "ERROR: failed to save raw benchtest output: ${output_path}"
+    : > "${RESULTS_DIR}/benchmark_bench.txt"
+    local bench_name output_path
+    for bench_name in "${GLIBC_BENCHMARKS[@]}"; do
+        output_path="${RESULTS_DIR}/benchtests/${bench_name}.out"
+        log "running ${bench_name} with ${TIMING_TYPE_OUTPUT}"
+        printf '%s\n' "${BUILD_DIR}/benchtests/${bench_name} > ${output_path}" \
+            >> "${RESULTS_DIR}/benchmark_bench.txt"
+        if ! "${BUILD_DIR}/benchtests/${bench_name}" > "${output_path}"; then
+            log "ERROR: ${bench_name} failed"
             return 50
         fi
-        saved_output_count=$((saved_output_count + 1))
+        if [[ ! -s "${output_path}" ]]; then
+            log "ERROR: ${bench_name} produced empty output"
+            return 50
+        fi
     done
-    if [[ "${saved_output_count}" -eq 0 ]]; then
-        log "ERROR: make bench produced no non-empty raw benchtest outputs"
-        return 50
-    fi
-    log "saved ${saved_output_count} official glibc raw benchtest outputs"
-    export SOFTWARE_VERSION EXPECTED_ARCH GLIBC_BENCHSET GLIBC_USE_CLOCK_GETTIME \
-        TIMING_TYPE_OUTPUT
+    export SOFTWARE_VERSION EXPECTED_ARCH GLIBC_BENCHSET TIMING_TYPE_OUTPUT
     python3 "${SCRIPT_DIR}/scripts/parse_benchmark.py" \
         "${RESULTS_DIR}/benchtests" \
         "${RESULTS_DIR}/benchmark_glibc.json" || {
@@ -463,8 +421,7 @@ run_glibc_standalone() {
                 "${PERF_RUN_ID}" \
                 "${GCC_VERSION_STRING}" \
                 --source-url="${GLIBC_SOURCE_URL}" \
-                --benchset="${GLIBC_BENCHSET}" \
-                --use-clock-gettime="${GLIBC_USE_CLOCK_GETTIME}"; then
+                --benchset="${GLIBC_BENCHSET}"; then
                 :
             else
                 stage_status=$?
@@ -541,7 +498,7 @@ Options:
 
 Environment overrides:
   SOFTWARE_VERSION, EXPECTED_ARCH, RESULTS_DIR, PERF_WORK_DIR,
-  GLIBC_SOURCE_URL, GLIBC_BENCHSET
+  GLIBC_SOURCE_URL
 USAGE
 }
 

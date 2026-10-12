@@ -2,11 +2,10 @@ name: glibc
 category: Toolchain
 enabled: true
 versions:
-  - "2.43"
-  - "2.44"
+  - "2.31"
 test_tools:
   glibc-benchtests:
-    version: "与被测软件版本一致"
+    version: "2.31"
 execution:
   type: shell-functions
   stages:
