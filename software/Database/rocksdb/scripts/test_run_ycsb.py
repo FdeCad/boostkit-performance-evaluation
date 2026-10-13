@@ -23,8 +23,8 @@ class RunYcsbTest(unittest.TestCase):
             distribution = work / "ycsb-dist"
             (distribution / "bin").mkdir(parents=True)
             (distribution / "workloads").mkdir()
-            (distribution / "rocksdb-binding" / "lib").mkdir(parents=True)
-            (distribution / "rocksdb-binding" / "lib" / "rocksdbjni-6.26.1.jar").write_bytes(b"fixture")
+            (distribution / "lib").mkdir()
+            (distribution / "lib" / "rocksdbjni-6.26.1.jar").write_bytes(b"fixture")
             for name in ("workloada", "workloadc"):
                 (distribution / "workloads" / name).write_text(name)
             (distribution / "bin" / "ycsb").write_text(

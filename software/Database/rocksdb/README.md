@@ -49,7 +49,8 @@ mvn -B -s "$WORK/maven-settings.xml" \
 `MAVEN_OPTS` 指向 `$WORK/maven-repository`，所以 YCSB 绑定使用本机刚构建的
 RocksDB 6.26.1 JNI JAR，而不是其 POM 默认的 RocksDB 6.2.2。
 构建出的 `ycsb-rocksdb-binding-0.18.0-SNAPSHOT.tar.gz` 解压至
-`$WORK/ycsb-dist`，正式测试调用包内原版 `bin/ycsb`。
+`$WORK/ycsb-dist`，正式测试调用包内原版 `bin/ycsb`。绑定包将所有 JAR 放在
+顶层 `lib/`；脚本会核对其中的 JNI JAR 与本机编译的 RocksDB JAR 完全一致。
 如果配置了 `PERF_PROXY`，只给本次 Maven 调用生成私有代理配置；未配置时直连。
 
 ## 数据与测试

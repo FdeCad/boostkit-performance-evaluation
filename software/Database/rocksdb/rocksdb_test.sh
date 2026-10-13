@@ -234,11 +234,11 @@ build_rocksdb() {
         log "ERROR: failed to extract YCSB RocksDB binding distribution"
         return 40
     fi
-    if [[ ! -s "${YCSB_DIST_DIR}/bin/ycsb" || ! -s "${YCSB_DIST_DIR}/rocksdb-binding/lib/rocksdbjni-${actual_version}.jar" ]]; then
+    if [[ ! -s "${YCSB_DIST_DIR}/bin/ycsb" || ! -s "${YCSB_DIST_DIR}/lib/rocksdbjni-${actual_version}.jar" ]]; then
         log "ERROR: YCSB distribution does not contain the expected original launcher and JNI JAR"
         return 40
     fi
-    if ! cmp -s "${jar_path}" "${YCSB_DIST_DIR}/rocksdb-binding/lib/rocksdbjni-${actual_version}.jar"; then
+    if ! cmp -s "${jar_path}" "${YCSB_DIST_DIR}/lib/rocksdbjni-${actual_version}.jar"; then
         log "ERROR: YCSB distribution JNI JAR differs from the locally built RocksDB JAR"
         return 40
     fi

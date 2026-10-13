@@ -82,7 +82,7 @@ def main() -> int:
         raise RuntimeError("RocksDB data directory must be a task-private child of PERF_WORK_DIR")
     if not (distribution / "bin" / "ycsb").is_file():
         raise RuntimeError("the original YCSB launcher is unavailable")
-    jni_jar = distribution / "rocksdb-binding" / "lib" / f"rocksdbjni-{os.environ['SOFTWARE_VERSION']}.jar"
+    jni_jar = distribution / "lib" / f"rocksdbjni-{os.environ['SOFTWARE_VERSION']}.jar"
     if not jni_jar.is_file():
         raise RuntimeError(f"the locally built RocksDB JNI JAR is unavailable: {jni_jar}")
     java_version = subprocess.run(
