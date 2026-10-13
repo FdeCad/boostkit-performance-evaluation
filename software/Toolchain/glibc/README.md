@@ -19,12 +19,14 @@ cd "$PERF_WORK_DIR/glibc-build"
 export PATH="$PERF_WORK_DIR/make-4.3-install/bin:$PATH"
 ../glibc-src/configure \
   --prefix="$PERF_WORK_DIR/glibc-install" \
-  --disable-werror CC=gcc CFLAGS=-O3
+  --disable-werror \
+  --without-selinux \
+  CC=gcc CFLAGS=-O3
 make -j"$(nproc)" CXX=
 make install cross-compiling=yes CXX=
 ```
 
-`CXX=` 让 glibc 2.31 使用其自带的 C 版构建辅助程序，避免链接 Runner 上需要更新 glibc 符号的 `libstdc++`；被测 `memcpy`、`memcmp` 的实现不变。安装命令不会更新 Runner 的系统动态链接器缓存。脚本用本次构建的 `elf/ldconfig --version` 和隔离前缀中的动态加载器校验结果。指导文档中的 `--enable-benchtests` 不属于 glibc 2.31 的配置选项。
+`CXX=` 让 glibc 2.31 使用其自带的 C 版构建辅助程序，避免链接 Runner 上需要更新 glibc 符号的 `libstdc++`。`--without-selinux` 在两架构上统一关闭可选 SELinux 集成，避免构建辅助程序链接依赖较新 glibc 的系统 `libselinux`；被测 `memcpy`、`memcmp` 的实现不变。安装命令不会更新 Runner 的系统动态链接器缓存。脚本用本次构建的 `elf/ldconfig --version` 和隔离前缀中的动态加载器校验结果。指导文档中的 `--enable-benchtests` 不属于 glibc 2.31 的配置选项。
 
 ## 计时与测试
 

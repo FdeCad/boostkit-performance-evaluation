@@ -282,6 +282,7 @@ build_glibc() {
         "${SRC_DIR}/configure" \
             --prefix="${INSTALL_DIR}" \
             --disable-werror \
+            --without-selinux \
             CC=gcc CFLAGS=-O3
     ) || {
         log "ERROR: glibc configure failed"
