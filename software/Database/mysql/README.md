@@ -56,7 +56,8 @@ mv "${PERF_WORK_DIR}/mysql-8.0.43-linux-glibc2.28-${EXPECTED_ARCH}" \
   --tmpdir="${MYSQL_TMP_DIR}" --user="$(id -un)" \
   --socket="${SOCKET_PATH}" --pid-file="${PID_FILE}" \
   --port="${MYSQL_PORT}" --bind-address="${MYSQL_HOST}" \
-  --max-connections=2048 --log-error="${ERR_LOG}" \
+  --max-connections=2048 --max-prepared-stmt-count=1048576 \
+  --log-error="${ERR_LOG}" \
   --innodb-flush-log-at-trx-commit=0 --innodb-use-native-aio=OFF --skip-log-bin
 ```
 
@@ -90,13 +91,17 @@ MYSQL_PWD="${MYSQL_PASSWORD}" "${MYSQLADMIN_BIN}" \
   --tmpdir="${MYSQL_TMP_DIR}" --user="$(id -un)" \
   --socket="${SOCKET_PATH}" --pid-file="${PID_FILE}" \
   --port="${MYSQL_PORT}" --bind-address="${MYSQL_HOST}" \
-  --max-connections=2048 --log-error="${ERR_LOG}" \
+  --max-connections=2048 --max-prepared-stmt-count=1048576 \
+  --log-error="${ERR_LOG}" \
   --innodb-flush-log-at-trx-commit=1 --innodb-use-native-aio=ON \
   --log-bin="${DATADIR}/mysql-bin"
 ```
 
 正式测试前会查询并保存 `innodb_flush_log_at_trx_commit`、
-`innodb_use_native_aio`、`log_bin` 和 `max_connections` 的实际生效值。
+`innodb_use_native_aio`、`log_bin`、`max_connections` 和
+`max_prepared_stmt_count` 的实际生效值。两种启动模式均校验预处理语句上限为
+`1048576`，以支持 64 张表、多线程的 Sysbench OLTP 场景；该值只是并发语句
+数量的上限，不会预先创建这么多语句。
 测试结束后再次通过任务 socket 正常关闭 MySQL，并清理私有数据目录。
 
 ## Sysbench 构建

@@ -30,6 +30,7 @@ MYSQL_PORT="${MYSQL_PORT:-}"
 MYSQL_DB_USER="${MYSQL_DB_USER:-root}"
 MYSQL_PASSWORD="${MYSQL_PASSWORD:-}"
 MYSQL_DATA_ROOT="${MYSQL_DATA_ROOT:-}"
+MYSQL_PREPARED_STMT_LIMIT=1048576
 
 # Lifecycle paths (assigned in configure_runtime_paths).
 MYSQL_BASE_DIR=""
@@ -387,7 +388,7 @@ start_mysql_service() {
 
 launch_mysql_server() {
     local mode="$1"
-    local attempt
+    local attempt actual_limit
     local -a mode_options
 
     case "${mode}" in
@@ -421,6 +422,7 @@ launch_mysql_server() {
         --port="${MYSQL_PORT}" \
         --bind-address="${MYSQL_HOST}" \
         --max-connections=2048 \
+        --max-prepared-stmt-count="${MYSQL_PREPARED_STMT_LIMIT}" \
         --log-error="${ERR_LOG}" \
         "${mode_options[@]}" || {
         log "ERROR: failed to launch mysqld (see ${ERR_LOG})"
@@ -429,6 +431,24 @@ launch_mysql_server() {
 
     for attempt in {1..60}; do
         if "${MYSQLADMIN_BIN}" --socket="${SOCKET_PATH}" -u root ping >/dev/null 2>&1; then
+            if [[ "${mode}" == prepare ]]; then
+                actual_limit="$("${MYSQL_BIN}" --socket="${SOCKET_PATH}" -u root -N \
+                    -e 'SELECT @@GLOBAL.max_prepared_stmt_count')" || {
+                    log "ERROR: cannot verify MySQL prepared-statement limit"
+                    return 40
+                }
+            else
+                actual_limit="$(MYSQL_PWD="${MYSQL_PASSWORD}" "${MYSQL_BIN}" \
+                    "-h${MYSQL_HOST}" "-P${MYSQL_PORT}" "-u${MYSQL_DB_USER}" -N \
+                    -e 'SELECT @@GLOBAL.max_prepared_stmt_count')" || {
+                    log "ERROR: cannot verify MySQL prepared-statement limit"
+                    return 40
+                }
+            fi
+            if [[ "${actual_limit}" != "${MYSQL_PREPARED_STMT_LIMIT}" ]]; then
+                log "ERROR: MySQL max_prepared_stmt_count is ${actual_limit}, expected ${MYSQL_PREPARED_STMT_LIMIT}"
+                return 40
+            fi
             log "mysqld is ready on port ${MYSQL_PORT} (socket ${SOCKET_PATH})"
             return 0
         fi
@@ -533,8 +553,8 @@ run_mysql_benchmarks() {
     launch_mysql_server benchmark || return 50
     MYSQL_PWD="${MYSQL_PASSWORD}" "${MYSQL_BIN}" \
         "-h${MYSQL_HOST}" "-P${MYSQL_PORT}" "-u${MYSQL_DB_USER}" -N \
-        -e 'SELECT @@innodb_flush_log_at_trx_commit, @@innodb_use_native_aio, @@log_bin, @@max_connections' \
-        | { printf '# benchmark configuration: flush_at_commit native_aio log_bin max_connections\n'; cat; } \
+        -e 'SELECT @@innodb_flush_log_at_trx_commit, @@innodb_use_native_aio, @@log_bin, @@max_connections, @@max_prepared_stmt_count' \
+        | { printf '# benchmark configuration: flush_at_commit native_aio log_bin max_connections max_prepared_stmt_count\n'; cat; } \
         | tee -a "${raw_output}" "${RESULTS_DIR}/mysql-benchmark-config.log" || return 50
 
     for scenario in read_only read_write write_only; do
