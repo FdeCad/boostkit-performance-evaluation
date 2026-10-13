@@ -11,6 +11,10 @@ Framework 按 `build`、`start`、`test`、`stop` 调用脚本中的阶段函数
 | MySQL | Oracle MySQL 8.0.43 Linux Generic 二进制包 | `${PERF_WORK_DIR}/mysql` |
 | Sysbench | [上游 Sysbench](https://github.com/akopytov/sysbench) 1.0.17，提交 `d634bce` | `${PERF_WORK_DIR}/sysbench-tools/sysbench-1.0.17` |
 
+Sysbench 在私有目录编译，不安装到系统目录。脚本以 `src/lua/` 中的绝对路径
+调用 OLTP 用例，并设置 `LUA_PATH` 供用例加载同目录的 `oltp_common.lua`；
+开始准备数据前会验证三个用例都能加载。
+
 ## MySQL 获取、部署与启动
 
 MySQL 包优先取 `/home/runner/software/mysql/` 中的对应架构离线包；没有时，
@@ -128,19 +132,26 @@ make -j"$(getconf _NPROCESSORS_ONLN)"
 5. 每次正式测试持续 120 秒，记录每秒进度和完整 Sysbench 汇总。只有进入
    只写场景时恢复准备数据快照。
 
-命令形态如下，`<连接参数>` 是本任务生成的主机、端口、账号和密码：
+命令形态如下，`<连接参数>` 是本任务生成的主机、端口、账号和密码；
+`SYSBENCH_LUA_DIR` 为 `${PERF_WORK_DIR}/sysbench-tools/sysbench-1.0.17/src/lua`：
 
 ```bash
-sysbench --db-driver=mysql <连接参数> --mysql-db=sbtest \
-  --table_size=10000000 --tables=64 --threads=256 oltp_read_write prepare
+LUA_PATH="${SYSBENCH_LUA_DIR}/?.lua;;" \
+  "${SYSBENCH_BIN}" --db-driver=mysql <连接参数> --mysql-db=sbtest \
+  --table_size=10000000 --tables=64 --threads=256 \
+  "${SYSBENCH_LUA_DIR}/oltp_read_write.lua" prepare
 
-sysbench --db-driver=mysql <连接参数> --mysql-db=sbtest \
+LUA_PATH="${SYSBENCH_LUA_DIR}/?.lua;;" \
+  "${SYSBENCH_BIN}" --db-driver=mysql <连接参数> --mysql-db=sbtest \
   --table_size=10000000 --tables=64 --threads=64 --time=300 \
-  --percentile=95 --report-interval=1 oltp_read_only run
+  --percentile=95 --report-interval=1 \
+  "${SYSBENCH_LUA_DIR}/oltp_read_only.lua" run
 
-sysbench --db-driver=mysql <连接参数> --mysql-db=sbtest \
+LUA_PATH="${SYSBENCH_LUA_DIR}/?.lua;;" \
+  "${SYSBENCH_BIN}" --db-driver=mysql <连接参数> --mysql-db=sbtest \
   --table_size=10000000 --tables=64 --threads=<线程数> --time=120 \
-  --percentile=95 --report-interval=1 oltp_<场景> run
+  --percentile=95 --report-interval=1 \
+  "${SYSBENCH_LUA_DIR}/oltp_<场景>.lua" run
 ```
 
 | 场景 | 线程数（一轮） |

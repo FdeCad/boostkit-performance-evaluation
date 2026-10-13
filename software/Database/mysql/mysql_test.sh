@@ -44,6 +44,7 @@ ERR_LOG=""
 MYSQL_TMP_DIR=""
 MYSQL_SNAPSHOT_DIR=""
 SYSBENCH_BIN=""
+SYSBENCH_LUA_DIR=""
 
 log() {
     printf '[mysql] %s\n' "$*"
@@ -93,6 +94,7 @@ configure_runtime_paths() {
     MYSQL_TMP_DIR="${SERVICE_DIR}/tmp"
     MYSQL_SNAPSHOT_DIR="${PERF_WORK_DIR}/mysql-data-snapshot"
     SYSBENCH_BIN="${PERF_WORK_DIR}/sysbench-tools/sysbench-1.0.17/src/sysbench"
+    SYSBENCH_LUA_DIR="${PERF_WORK_DIR}/sysbench-tools/sysbench-1.0.17/src/lua"
     TMPDIR="${MYSQL_TMP_DIR}"
     export SOFTWARE_VERSION EXPECTED_ARCH PERF_RUN_ID RESULTS_DIR PERF_WORK_DIR
     export PERF_ACTUAL_VERSION_FILE TMPDIR
@@ -459,6 +461,7 @@ shutdown_mysql_server() {
 
 run_sysbench() {
     local workload="$1" threads="$2" duration="$3" label="$4"
+    local workload_script="${SYSBENCH_LUA_DIR}/oltp_${workload}.lua"
     local raw_output="${RESULTS_DIR}/sysbench_raw.log"
     local run_output="${RESULTS_DIR}/sysbench-runs/${label}.log"
     local action=run
@@ -476,10 +479,11 @@ run_sysbench() {
     if [[ "${label}" == prepare ]]; then
         action=prepare
     fi
-    command+=("oltp_${workload}" "${action}")
+    command+=("${workload_script}" "${action}")
     printf '# %s: oltp_%s %s, threads=%s, time=%s\n' \
         "${label}" "${workload}" "${action}" "${threads}" "${duration}" | tee -a "${raw_output}" "${run_output}"
-    if ! "${command[@]}" 2>&1 | tee -a "${raw_output}" "${run_output}"; then
+    if ! LUA_PATH="${SYSBENCH_LUA_DIR}/?.lua;;" "${command[@]}" 2>&1 \
+        | tee -a "${raw_output}" "${run_output}"; then
         log "ERROR: Sysbench ${label} failed"
         return 50
     fi

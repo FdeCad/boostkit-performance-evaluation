@@ -61,4 +61,18 @@ if [[ ! -x "${sysbench_source_directory}/src/sysbench" ]]; then
     exit 40
 fi
 
+lua_directory="${sysbench_source_directory}/src/lua"
+for workload in read_write read_only write_only; do
+    script="${lua_directory}/oltp_${workload}.lua"
+    if [[ ! -f "${script}" ]]; then
+        printf '[mysql] ERROR: Sysbench workload script is missing: %s\n' "${script}" >&2
+        exit 40
+    fi
+    if ! LUA_PATH="${lua_directory}/?.lua;;" \
+        "${sysbench_source_directory}/src/sysbench" "${script}" help >/dev/null; then
+        printf '[mysql] ERROR: Sysbench cannot load workload script: %s\n' "${script}" >&2
+        exit 40
+    fi
+done
+
 printf '[mysql] Sysbench %s is ready\n' "${sysbench_ref}"
