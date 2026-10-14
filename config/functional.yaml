@@ -1,0 +1,29 @@
+# 功能测试框架全局配置。
+# 矩阵维度 = software × version × operating_systems × hardware。
+# 版本白名单由各软件自己的 func_case.yaml 维护(人工指定,不做 latest 解析)。
+
+architectures:
+  - aarch64
+
+# OS 维度。runtime 决定该 cell 的落地方式:
+#   native    - 直接在宿主 Runner 上执行
+#   container - 在指定镜像的容器内执行
+# 两个 OS 都走容器:openeuler 容器与宿主同源(内核 + userland 均为 24.03-sp4);
+# ubuntu 容器与宿主共享内核(见方案第 10 节限制)。
+operating_systems:
+  - name: openeuler-24.03-sp4
+    runtime: container
+    image: kunpeng/openeuler:24.03-sp4
+  - name: ubuntu-26.04.1
+    runtime: container
+    image: kunpeng/ubuntu:26.04.1
+
+# 硬件维度。每台物理机对应一个自托管 Runner 标签。
+hardware:
+  - name: kunpeng920
+    runner_label: PERF_FUNC_KUNPENG920
+  - name: kunpeng950
+    runner_label: PERF_FUNC_KUNPENG950
+
+output_root: .func-output
+work_root: /home/runner/boostkit-func
