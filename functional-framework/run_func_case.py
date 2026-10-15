@@ -191,9 +191,9 @@ def _ensure_image(image: str) -> None:
         print(f"[cell] using local image {image}", flush=True)
         return
     print(f"[cell] image {image} not found locally; pulling", flush=True)
-    pull = subprocess.run([engine, "pull", image], capture_output=True, text=True)
+    pull = subprocess.run([engine, "pull", image])
     if pull.returncode != 0:
-        raise RuntimeError(f"failed to pull image {image}: {pull.stderr.strip()}")
+        raise RuntimeError(f"failed to pull image {image} (exit code {pull.returncode})")
 
 
 def _container_status(engine: str, name: str) -> str:
