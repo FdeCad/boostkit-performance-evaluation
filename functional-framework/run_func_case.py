@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
 
-from catalog_func import FUNC_STAGES, ROOT, load_config, validate_case
+from catalog_func import FUNC_STAGES, ROOT, compose_image, load_config, validate_case
 
 STAGE_EXIT_CODES = {"prepare": 20, "install": 30, "check": 50, "cleanup": 70}
 FORWARD_ENV_KEYS = (
@@ -22,6 +22,7 @@ FORWARD_ENV_KEYS = (
     "EXPECTED_ARCH",
     "FUNC_OS",
     "FUNC_HARDWARE",
+    "FUNC_MODE",
     "PERF_RUN_ID",
     "PERF_WORK_DIR",
     "RESULTS_DIR",
@@ -54,7 +55,8 @@ class CellContext:
     version: str
     operating_system: str
     os_runtime: str
-    os_image: str
+    mode: str
+    image: str
     hardware: str
     architecture: str
     run_id: str
@@ -105,6 +107,12 @@ def build_context(args: argparse.Namespace, case: dict[str, Any], config: dict[s
     category = case["category"]
     software = case["name"]
     os_spec = config["operating_systems"][args.os]
+    if os_spec["runtime"] != "container":
+        image = ""
+    elif os_spec["mode"] == "build":
+        image = os_spec["image"]
+    else:
+        image = compose_image(os_spec["image_template"], software, args.version)
     output_dir = (
         ROOT / config["output_root"] / category / software / args.version
         / args.os / args.hardware / args.run_id
@@ -122,7 +130,8 @@ def build_context(args: argparse.Namespace, case: dict[str, Any], config: dict[s
         version=args.version,
         operating_system=args.os,
         os_runtime=os_spec["runtime"],
-        os_image=os_spec["image"],
+        mode=os_spec.get("mode", ""),
+        image=image,
         hardware=args.hardware,
         architecture=args.architecture,
         run_id=args.run_id,
@@ -137,6 +146,7 @@ def stage_environment(context: CellContext) -> dict[str, str]:
         "EXPECTED_ARCH": context.architecture,
         "FUNC_OS": context.operating_system,
         "FUNC_HARDWARE": context.hardware,
+        "FUNC_MODE": context.mode,
         "PERF_RUN_ID": context.run_id,
         "PERF_WORK_DIR": str(context.work_dir),
         "RESULTS_DIR": str(context.output_dir),
@@ -159,11 +169,34 @@ def _inner_shell(script: Path, function: str) -> list[str]:
     ]
 
 
-def _container_command(
-    context: CellContext, script: Path, function: str, environment: dict[str, str]
-) -> list[str]:
-    engine = os.environ.get("PERF_CONTAINER_ENGINE", "docker")
-    command = [engine, "run", "--rm", "-i"]
+def _container_engine() -> str:
+    return os.environ.get("PERF_CONTAINER_ENGINE", "docker")
+
+
+def _container_name(context: CellContext) -> str:
+    raw = f"boostkit-func-{context.run_id}-{context.operating_system}-{context.hardware}"
+    return "".join(char if (char.isalnum() or char in "_.-") else "-" for char in raw)
+
+
+def _ensure_container(context: CellContext, environment: dict[str, str]) -> str:
+    """Start (or reuse) one persistent container per cell.
+
+    The container stays alive across stages so that build-mode installs
+    (dependencies, compiled artifacts in the image filesystem) survive into
+    the check stage.
+    """
+    engine = _container_engine()
+    name = _container_name(context)
+    inspect = subprocess.run(
+        [engine, "inspect", "-f", "{{.State.Running}}", name],
+        capture_output=True, text=True,
+    )
+    if inspect.returncode == 0:
+        if inspect.stdout.strip() != "true":
+            subprocess.run([engine, "start", name], check=True)
+        return name
+
+    command = [engine, "run", "-d", "--name", name]
     mounted: set[str] = set()
     for host in (context.root, context.output_dir, context.work_dir):
         target = str(host)
@@ -174,10 +207,34 @@ def _container_command(
     command += ["-w", str(context.case_dir)]
     for key in FORWARD_ENV_KEYS:
         value = environment.get(key)
+        if value is not None:
+            command += ["-e", f"{key}={value}"]
+    command += [context.image, "sleep", "infinity"]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"failed to start container {name} from {context.image}: {result.stderr.strip()}"
+        )
+    return name
+
+
+def _remove_container(context: CellContext) -> None:
+    subprocess.run(
+        [_container_engine(), "rm", "-f", _container_name(context)],
+        capture_output=True, text=True,
+    )
+
+
+def _container_exec_command(
+    context: CellContext, name: str, script: Path, function: str, environment: dict[str, str]
+) -> list[str]:
+    command = [_container_engine(), "exec", "-i", "-w", str(context.case_dir)]
+    for key in FORWARD_ENV_KEYS:
+        value = environment.get(key)
         if value is None:
             continue
         command += ["-e", f"{key}={value}"]
-    command += [context.os_image]
+    command += [name]
     command += _inner_shell(script, function)
     return command
 
@@ -194,7 +251,8 @@ def run_stage(context: CellContext, stage: str, timeout_minutes: float) -> int:
 
     environment = stage_environment(context)
     if context.os_runtime == "container":
-        command = _container_command(context, script, function, environment)
+        name = _ensure_container(context, environment)
+        command = _container_exec_command(context, name, script, function, environment)
         process_env = dict(os.environ)
     else:
         command = _inner_shell(script, function)
@@ -367,6 +425,9 @@ def main() -> int:
 
     returncode = run_stage(context, args.stage, timeout_minutes)
     print(f"[cell] stage {args.stage} exited with code {returncode}", flush=True)
+
+    if args.stage == "cleanup" and context.os_runtime == "container":
+        _remove_container(context)
 
     if returncode != 0:
         write_status(

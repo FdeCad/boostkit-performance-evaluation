@@ -1,8 +1,10 @@
-# 功能测试用 Ubuntu 26.04 基础镜像。
-# 固化构建工具链,保证矩阵内可比、可离线、避免每次运行联网装包。
+# Ubuntu 26.04 LTS 基础镜像(软件镜像的底座)。
+# 固化构建工具链,便于在其上叠装被测软件、离线化。
 # 构建(aarch64 Runner 上):
-#   docker build -t kunpeng/ubuntu:26.04.1 images/ubuntu-26.04
-# 建议记录镜像 digest,锁定 ubuntu:26.04 这一滚动 tag 的实际内容。
+#   docker build -t kunpeng/ubuntu-26.04.1:base images/ubuntu-26.04
+# 软件镜像以本镜像为底座,按 <仓库>:<软件>-<版本> 命名,例如:
+#   FROM kunpeng/ubuntu-26.04.1:base  =>  kunpeng/ubuntu-26.04.1:redis-8.10.2
+# 建议记录镜像 digest,锁定 ubuntu:26.04 的实际内容。
 FROM ubuntu:26.04
 
 ENV DEBIAN_FRONTEND=noninteractive

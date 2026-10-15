@@ -18,6 +18,7 @@ CONFIG_RELATIVE = Path("config") / "functional.yaml"
 FUNC_STAGES = ("prepare", "install", "check", "cleanup")
 VALID_OUTPUT_FORMATS = {"json", "text"}
 VALID_RUNTIMES = {"native", "container"}
+VALID_MODES = {"prebuilt", "build"}
 SHELL_FUNCTION_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 OUTPUT_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 CHECK_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*$")
@@ -66,13 +67,30 @@ def load_config(root: Path = ROOT) -> dict[str, Any]:
             raise ValueError(
                 f"operating_systems.{name}.runtime must be one of {sorted(VALID_RUNTIMES)}"
             )
-        image = entry.get("image", "")
-        if runtime == "container" and (not isinstance(image, str) or not image):
-            raise ValueError(
-                f"operating_systems.{name}.image is required for container runtime"
-            )
-        if image and not isinstance(image, str):
-            raise ValueError(f"operating_systems.{name}.image must be a string")
+        if runtime == "container":
+            mode = entry.get("mode")
+            if mode not in VALID_MODES:
+                raise ValueError(
+                    f"operating_systems.{name}.mode must be one of {sorted(VALID_MODES)}"
+                )
+            if mode == "prebuilt":
+                image_template = entry.get("image_template", "")
+                if not isinstance(image_template, str) or not image_template:
+                    raise ValueError(
+                        f"operating_systems.{name}.image_template is required "
+                        "for container/prebuilt mode"
+                    )
+                if "{software}" not in image_template or "{version}" not in image_template:
+                    raise ValueError(
+                        f"operating_systems.{name}.image_template must contain "
+                        "{software} and {version}"
+                    )
+            else:
+                image = entry.get("image", "")
+                if not isinstance(image, str) or not image:
+                    raise ValueError(
+                        f"operating_systems.{name}.image is required for container/build mode"
+                    )
 
     hardware = index_by_name(data.get("hardware"), "hardware")
     for name, entry in hardware.items():
@@ -93,6 +111,8 @@ def load_config(root: Path = ROOT) -> dict[str, Any]:
             name: {
                 "name": name,
                 "runtime": entry["runtime"],
+                "mode": entry.get("mode", ""),
+                "image_template": entry.get("image_template", ""),
                 "image": entry.get("image", ""),
             }
             for name, entry in operating_systems.items()
@@ -104,6 +124,11 @@ def load_config(root: Path = ROOT) -> dict[str, Any]:
         "output_root": output_root,
         "work_root": work_root,
     }
+
+
+def compose_image(image_template: str, software: str, version: str) -> str:
+    """Render the per-software image, e.g. 'openeuler/{software}:{version}-oe2403sp3'."""
+    return image_template.format(software=software, version=version)
 
 
 def discover_cases(root: Path = ROOT) -> list[Path]:
@@ -379,6 +404,14 @@ def build_matrix(
                 if selected_os is not None and os_name not in selected_os:
                     continue
                 os_spec = config["operating_systems"][os_name]
+                if os_spec["runtime"] != "container":
+                    image = ""
+                elif os_spec["mode"] == "build":
+                    image = os_spec["image"]
+                else:
+                    image = compose_image(
+                        os_spec["image_template"], case_name, case_version
+                    )
                 for hardware_name in hardware_names:
                     if selected_hardware is not None and hardware_name not in selected_hardware:
                         continue
@@ -390,7 +423,9 @@ def build_matrix(
                         "architecture": architecture,
                         "os": os_name,
                         "os_runtime": os_spec["runtime"],
-                        "os_image": os_spec["image"],
+                        "os_mode": os_spec["mode"],
+                        "os_image_template": os_spec["image_template"],
+                        "image": image,
                         "hardware": hardware_name,
                         "runner_label": hw_spec["runner_label"],
                         "timeout_minutes": timeout,

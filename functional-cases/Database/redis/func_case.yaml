@@ -13,16 +13,16 @@ execution:
   type: shell-functions
   stages:
     prepare:
-      script: func_test.sh
+      script: build.sh
       function: func_prepare
     install:
-      script: func_test.sh
+      script: build.sh
       function: func_install
     check:
-      script: func_test.sh
+      script: test.sh
       function: func_check
     cleanup:
-      script: func_test.sh
+      script: test.sh
       function: func_cleanup
   timeout_minutes: 60
 

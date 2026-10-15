@@ -10,20 +10,32 @@ on:
         default: redis
         type: string
       version:
-        description: "Version, comma-separated versions, or all"
+        description: "Software version"
         required: true
         default: all
-        type: string
+        type: choice
+        options:
+          - "8.10.2"
+          - "6.0.20"
+          - all
       os:
-        description: "OS name, comma-separated names, or all"
+        description: "Operating system"
         required: true
         default: all
-        type: string
+        type: choice
+        options:
+          - openeuler-24.03-sp4
+          - ubuntu-26.04.1
+          - all
       hardware:
-        description: "Hardware name, comma-separated names, or all"
+        description: "Hardware"
         required: true
         default: all
-        type: string
+        type: choice
+        options:
+          - kunpeng920
+          - kunpeng950
+          - all
 
 permissions:
   contents: read
