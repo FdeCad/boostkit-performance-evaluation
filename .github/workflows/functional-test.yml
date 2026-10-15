@@ -5,19 +5,55 @@ on:
   workflow_dispatch:
     inputs:
       software:
-        description: "Software name, comma-separated names, or all"
+        description: "Software under test"
         required: true
         default: redis
-        type: string
-      version:
-        description: "Software version"
-        required: true
-        default: all
         type: choice
         options:
-          - "8.10.2"
-          - "6.0.20"
+          # AI
+          - faiss
+          - hnswlib
+          - openviking
+          - pytorch
+          - scann
+          # Bigdata
+          - bolt
+          - flink
+          - spark
+          # Database
+          - mysql
+          - oceanbase
+          - redis
+          - rocksdb
+          # HPC
+          - folly
+          - lz4
+          - protobuf
+          - snappy
+          - sonic-cpp
+          - sonic-go
+          - zstd
+          # Media
+          - x264
+          - x265
+          # Middleware
+          - brpc
+          - envoy
+          - kubernetes
+          # Storage
+          - ceph
+          # Toolchain
+          - bishengjdk
+          - gcc
+          - glibc
+          - golang
+          - python
           - all
+      version:
+        description: "Software version, comma-separated versions, or all (see the software's func_case.yaml)"
+        required: true
+        default: all
+        type: string
       os:
         description: "Operating system"
         required: true
