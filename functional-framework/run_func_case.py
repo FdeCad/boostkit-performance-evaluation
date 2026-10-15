@@ -178,6 +178,21 @@ def _container_name(context: CellContext) -> str:
     return "".join(char if (char.isalnum() or char in "_.-") else "-" for char in raw)
 
 
+def _ensure_image(image: str) -> None:
+    """Use the local image when present; otherwise pull it from the registry."""
+    engine = _container_engine()
+    local = subprocess.run(
+        [engine, "image", "inspect", image], capture_output=True, text=True
+    )
+    if local.returncode == 0:
+        print(f"[cell] using local image {image}", flush=True)
+        return
+    print(f"[cell] image {image} not found locally; pulling", flush=True)
+    pull = subprocess.run([engine, "pull", image], capture_output=True, text=True)
+    if pull.returncode != 0:
+        raise RuntimeError(f"failed to pull image {image}: {pull.stderr.strip()}")
+
+
 def _ensure_container(context: CellContext, environment: dict[str, str]) -> str:
     """Start (or reuse) one persistent container per cell.
 
@@ -196,6 +211,7 @@ def _ensure_container(context: CellContext, environment: dict[str, str]) -> str:
             subprocess.run([engine, "start", name], check=True)
         return name
 
+    _ensure_image(context.image)
     command = [engine, "run", "-d", "--name", name]
     mounted: set[str] = set()
     for host in (context.root, context.output_dir, context.work_dir):
