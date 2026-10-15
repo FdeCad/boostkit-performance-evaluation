@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
@@ -195,22 +196,50 @@ def _ensure_image(image: str) -> None:
         raise RuntimeError(f"failed to pull image {image}: {pull.stderr.strip()}")
 
 
+def _container_status(engine: str, name: str) -> str:
+    result = subprocess.run(
+        [engine, "inspect", "-f", "{{.State.Status}}", name],
+        capture_output=True, text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _wait_until_running(engine: str, name: str, attempts: int = 60) -> None:
+    """Wait until the container is running and accepts exec."""
+    for _ in range(attempts):
+        status = _container_status(engine, name)
+        if status in {"exited", "dead"}:
+            logs = subprocess.run(
+                [engine, "logs", "--tail", "50", name], capture_output=True, text=True
+            )
+            raise RuntimeError(
+                f"container {name} stopped ({status}): "
+                f"{logs.stdout.strip()} {logs.stderr.strip()}"
+            )
+        if status == "running":
+            probe = subprocess.run(
+                [engine, "exec", name, "true"], capture_output=True, text=True
+            )
+            if probe.returncode == 0:
+                return
+        time.sleep(0.5)
+    raise RuntimeError(f"container {name} did not become exec-ready")
+
+
 def _ensure_container(context: CellContext, environment: dict[str, str]) -> str:
     """Start (or reuse) one persistent container per cell.
 
     The container stays alive across stages so that build-mode installs
     (dependencies, compiled artifacts in the image filesystem) survive into
-    the check stage.
+    the check stage.  We wait until it is actually running before executing
+    a stage, otherwise the first exec can race container startup.
     """
     engine = _container_engine()
     name = _container_name(context)
-    inspect = subprocess.run(
-        [engine, "inspect", "-f", "{{.State.Running}}", name],
-        capture_output=True, text=True,
-    )
-    if inspect.returncode == 0:
-        if inspect.stdout.strip() != "true":
+    if _container_status(engine, name):
+        if _container_status(engine, name) != "running":
             subprocess.run([engine, "start", name], check=True)
+        _wait_until_running(engine, name)
         return name
 
     _ensure_image(context.image)
@@ -233,6 +262,7 @@ def _ensure_container(context: CellContext, environment: dict[str, str]) -> str:
         raise RuntimeError(
             f"failed to start container {name} from {context.image}: {result.stderr.strip()}"
         )
+    _wait_until_running(engine, name)
     return name
 
 
