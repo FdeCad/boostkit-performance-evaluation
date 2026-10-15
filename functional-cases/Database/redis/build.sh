@@ -15,12 +15,13 @@ func_prepare() {
     initialize_runtime || return $?
     local arch platform kernel cpu_count python_version gcc_version glibc_version
     arch="$(uname -m)"
-    platform="$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release 2>/dev/null | head -n 1 | tr -d '"')"
+    platform="$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release 2>/dev/null | head -n 1 | tr -d '"' || true)"
     kernel="$(uname -r)"
     cpu_count="$(nproc 2>/dev/null || printf '0')"
-    python_version="$(python3 --version 2>/dev/null | awk '{print $2}')"
-    gcc_version="$(gcc -dumpfullversion -dumpversion 2>/dev/null | head -n 1)"
-    glibc_version="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')"
+    # 缺失的命令只记录为 unknown,不能因为探测失败而让 set -e 退出(否则静默 127)。
+    python_version="$(python3 --version 2>/dev/null | awk '{print $2}' || true)"
+    gcc_version="$(gcc -dumpfullversion -dumpversion 2>/dev/null | head -n 1 || true)"
+    glibc_version="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}' || true)"
     cat >"${RESULTS_DIR}/system_info.json" <<EOF
 {
   "architecture": "$(json_escape "${arch}")",
