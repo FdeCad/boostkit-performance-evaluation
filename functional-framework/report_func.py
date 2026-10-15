@@ -49,72 +49,107 @@ def collect_results(input_root: Path) -> list[dict[str, Any]]:
 
 
 def build_matrix(results: list[dict[str, Any]]) -> dict[str, Any]:
-    columns = sorted({(r.get("os", "?"), r.get("hardware", "?")) for r in results})
-    rows: dict[tuple[str, str], dict[str, Any]] = {}
-    for result in results:
-        key = (str(result.get("software", "?")), str(result.get("version", "?")))
-        row = rows.setdefault(key, {"software": key[0], "version": key[1], "cells": {}})
-        column = (str(result.get("os", "?")), str(result.get("hardware", "?")))
-        row["cells"][f"{column[0]}|{column[1]}"] = {
-            "status": result.get("status", "unknown"),
-            "checks": result.get("checks", []),
-        }
+    """精简结构：软件 -> 版本 -> OS -> 硬件 -> 状态。
+
+    例：{"redis": {"6.0.20": {"openeuler-24.03-sp4": {"kunpeng920": "passed",
+                                                     "kunpeng950": "failed"}}}}
+    """
+    matrix: dict[str, dict[str, dict[str, dict[str, str]]]] = {}
+    for result in sorted(
+        results,
+        key=lambda item: (
+            str(item.get("software", "?")),
+            str(item.get("version", "?")),
+            str(item.get("os", "?")),
+            str(item.get("hardware", "?")),
+        ),
+    ):
+        software = str(result.get("software", "?"))
+        version = str(result.get("version", "?"))
+        os_name = str(result.get("os", "?"))
+        hardware = str(result.get("hardware", "?"))
+        matrix.setdefault(software, {}).setdefault(version, {}).setdefault(os_name, {})[
+            hardware
+        ] = result.get("status", "unknown")
+    return matrix
+
+
+def summarize(results: list[dict[str, Any]]) -> dict[str, int]:
     return {
-        "columns": [{"os": os_name, "hardware": hw} for os_name, hw in columns],
-        "rows": [rows[key] for key in sorted(rows)],
-        "summary": {
-            "total_cells": len(results),
-            "passed": sum(1 for r in results if r.get("status") == "passed"),
-            "failed": sum(1 for r in results if r.get("status") != "passed"),
-        },
+        "total_cells": len(results),
+        "passed": sum(1 for r in results if r.get("status") == "passed"),
+        "failed": sum(1 for r in results if r.get("status") != "passed"),
     }
 
 
-def render_markdown(matrix: dict[str, Any]) -> str:
-    columns = matrix["columns"]
-    summary = matrix["summary"]
+def render_markdown(matrix: dict[str, Any], results: list[dict[str, Any]]) -> str:
+    rows = [(software, version) for software, versions in matrix.items() for version in versions]
+    os_names = sorted({os_name for versions in matrix.values() for ver in versions.values() for os_name in ver})
+    summary = summarize(results)
     lines = [
         "# 功能测试矩阵",
         "",
         f"- 单元格总数：{summary['total_cells']}",
         f"- 通过：{summary['passed']}",
         f"- 失败：{summary['failed']}",
-        "",
     ]
-    header = ["软件", "版本", *(f"{c['os']}<br>{c['hardware']}" for c in columns)]
-    lines.append("| " + " | ".join(header) + " |")
-    lines.append("|" + "---|" * len(header))
-    for row in matrix["rows"]:
-        cells = row["cells"]
-        rendered = []
-        for column in columns:
-            cell = cells.get(f"{column['os']}|{column['hardware']}")
-            status = cell.get("status", "unknown") if cell else "missing"
-            rendered.append(STATUS_LABELS.get(status, status.upper()))
-        lines.append("| " + " | ".join([row["software"], row["version"], *rendered]) + " |")
+
+    for os_name in os_names:
+        # 该 OS 下出现过的硬件（列），以及有结果的行（软件 × 版本）。
+        hardware_names = sorted({
+            hardware
+            for versions in matrix.values()
+            for ver in versions.values()
+            for entry_os, hw_map in ver.items()
+            if entry_os == os_name
+            for hardware in hw_map
+        })
+        lines.extend(["", f"## {os_name}", ""])
+        header = ["软件", "版本", *hardware_names]
+        lines.append("| " + " | ".join(header) + " |")
+        lines.append("|" + "---|" * len(header))
+        for software, version in sorted(rows):
+            hw_map = matrix.get(software, {}).get(version, {}).get(os_name)
+            if hw_map is None:
+                continue
+            rendered = [
+                STATUS_LABELS.get(hw_map.get(hardware, "unknown"), STATUS_LABELS["unknown"])
+                for hardware in hardware_names
+            ]
+            lines.append("| " + " | ".join([software, version, *rendered]) + " |")
 
     detail = [
-        (row["software"], row["version"], column, row["cells"].get(f"{column['os']}|{column['hardware']}"))
-        for row in matrix["rows"]
-        for column in columns
-        if row["cells"].get(f"{column['os']}|{column['hardware']}", {}).get("status") != "passed"
+        result for result in results
+        if result.get("status") != "passed" and result.get("software")
     ]
     if detail:
         lines.extend(["", "## 未通过明细", ""])
-        lines.append("| 软件 | 版本 | OS | 硬件 | 检查项 |")
+        lines.append("| OS | 硬件 | 软件 | 版本 | 检查项 |")
         lines.append("|---|---|---|---|---|")
-        for software, version, column, cell in detail:
-            checks = cell.get("checks", []) if cell else []
-            failing = [c for c in checks if isinstance(c, dict) and c.get("status") != "passed"]
+        for result in sorted(
+            detail,
+            key=lambda item: (
+                str(item.get("os", "?")), str(item.get("hardware", "?")),
+                str(item.get("software", "?")), str(item.get("version", "?")),
+            ),
+        ):
+            failing = [
+                check for check in result.get("checks", [])
+                if isinstance(check, dict) and check.get("status") != "passed"
+            ]
             if failing:
                 for check in failing:
                     lines.append(
-                        f"| {software} | {version} | {column['os']} | {column['hardware']} | "
+                        f"| {result.get('os')} | {result.get('hardware')} | "
+                        f"{result.get('software')} | {result.get('version')} | "
                         f"{check.get('name')}: {check.get('detail', '')} |"
                     )
             else:
-                status = cell.get("status", "missing") if cell else "missing"
-                lines.append(f"| {software} | {version} | {column['os']} | {column['hardware']} | {status} |")
+                lines.append(
+                    f"| {result.get('os')} | {result.get('hardware')} | "
+                    f"{result.get('software')} | {result.get('version')} | "
+                    f"{result.get('status')} |"
+                )
     lines.append("")
     return "\n".join(lines)
 
@@ -142,9 +177,11 @@ def generate(input_root: Path, output_dir: Path) -> dict[str, Any]:
     matrix = build_matrix(results)
     output_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(output_dir / "combined-report.json", matrix)
-    (output_dir / "combined-report.md").write_text(render_markdown(matrix), encoding="utf-8")
+    (output_dir / "combined-report.md").write_text(
+        render_markdown(matrix, results), encoding="utf-8"
+    )
     (output_dir / "junit.xml").write_text(render_junit(results), encoding="utf-8")
-    return matrix["summary"]
+    return summarize(results)
 
 
 def main() -> int:
