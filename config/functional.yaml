@@ -16,7 +16,7 @@ operating_systems:
   - name: openeuler-24.03-sp4
     runtime: container
     mode: prebuilt
-    image_template: "openeuler/{software}:{version}-oe2403sp3"
+    image_template: "openeulertest/{software}:{version}-oe2403sp3"
   - name: ubuntu-26.04.1
     runtime: container
     mode: build
