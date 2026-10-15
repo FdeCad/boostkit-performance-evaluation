@@ -126,9 +126,9 @@ def load_config(root: Path = ROOT) -> dict[str, Any]:
     }
 
 
-def compose_image(image_template: str, software: str, version: str) -> str:
-    """Render the per-software image, e.g. 'openeuler/{software}:{version}-oe2403sp3'."""
-    return image_template.format(software=software, version=version)
+def compose_image(image_template: str, software: str, version: str, arch: str) -> str:
+    """Render the per-software image, e.g. 'openeulertest/{software}:{version}-oe2403sp4-{arch}'."""
+    return image_template.format(software=software, version=version, arch=arch)
 
 
 def discover_cases(root: Path = ROOT) -> list[Path]:
@@ -410,7 +410,7 @@ def build_matrix(
                     image = os_spec["image"]
                 else:
                     image = compose_image(
-                        os_spec["image_template"], case_name, case_version
+                        os_spec["image_template"], case_name, case_version, architecture
                     )
                 for hardware_name in hardware_names:
                     if selected_hardware is not None and hardware_name not in selected_hardware:

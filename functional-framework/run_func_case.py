@@ -112,7 +112,9 @@ def build_context(args: argparse.Namespace, case: dict[str, Any], config: dict[s
     elif os_spec["mode"] == "build":
         image = os_spec["image"]
     else:
-        image = compose_image(os_spec["image_template"], software, args.version)
+        image = compose_image(
+            os_spec["image_template"], software, args.version, args.architecture
+        )
     output_dir = (
         ROOT / config["output_root"] / category / software / args.version
         / args.os / args.hardware / args.run_id

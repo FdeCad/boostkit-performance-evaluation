@@ -11,12 +11,13 @@ architectures:
 # mode 决定容器内如何取得被测软件:
 #   prebuilt - 拉预构建软件镜像(image_template 渲染),已装好软件,install 只校验
 #   build    - 当场起基础镜像(image),在容器内跑安装脚本(装依赖 + 构建)与测试脚本
-# image_template 支持 {software} 与 {version} 占位,例:openeuler/redis:8.6.4-oe2403sp3
+# image_template 支持 {software}、{version}、{arch} 占位,
+# 例:openeulertest/redis:6.0.20-oe2403sp4-aarch64
 operating_systems:
   - name: openeuler-24.03-sp4
     runtime: container
     mode: prebuilt
-    image_template: "openeulertest/{software}:{version}-oe2403sp3"
+    image_template: "openeulertest/{software}:{version}-oe2403sp4-{arch}"
   - name: ubuntu-26.04.1
     runtime: container
     mode: build
