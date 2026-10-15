@@ -19,8 +19,10 @@ REDIS_SOURCE_URL="${REDIS_SOURCE_URL:-https://github.com/redis/redis.git}"
 REDIS_UPSTREAM_TEST="${REDIS_UPSTREAM_TEST:-unit/type/string}"
 REDIS_SERVICE_PORT="${REDIS_SERVICE_PORT:-}"
 # 上游 Tcl 套件所需的源码树:
+#   REDIS_RUN_ROOT   - 本次运行的工作根(短路径),见 configure_runtime_paths 中的说明。
 #   REDIS_TEST_TREE  - 本次运行为跑套件准备的树(prebuilt=浅克隆测试脚本;build=本次克隆并编译),由 configure_runtime_paths 设置。
 #   REDIS_SOURCE_DIR - 显式覆盖(例如镜像已内置源码树时)。
+REDIS_RUN_ROOT="${REDIS_RUN_ROOT:-}"
 REDIS_TEST_TREE="${REDIS_TEST_TREE:-}"
 REDIS_SOURCE_DIR="${REDIS_SOURCE_DIR:-}"
 
@@ -109,13 +111,18 @@ configure_runtime_paths() {
         return 10
     }
 
+    # 上游套件把 unixsocket 建在 cwd 下的 tests/tmp/server.<pid>.<n>/socket,而 AF_UNIX 路径上限 108 字节,
+    # 且套件用 [file normalize](会解析软链)。PERF_WORK_DIR 很深,路径被截断成同一前缀后
+    # 所有测试服务器会 bind 到同一个 socket,报 "Address already in use"。
+    # 因此把运行树放到短路径 /tmp 下(不同 run_id 互不干扰;容器模式随容器销毁,原生模式在 cleanup 删除)。
+    REDIS_RUN_ROOT="${REDIS_RUN_ROOT:-/tmp/redis-func-${PERF_RUN_ID}}"
     if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
         # 镜像只提供二进制;install 阶段会浅克隆测试脚本并软链这些二进制到 ${REDIS_TEST_TREE}/src。
         REDIS_SERVER_BIN="$(command -v redis-server || true)"
         REDIS_CLI_BIN="$(command -v redis-cli || true)"
-        REDIS_TEST_TREE="${PERF_WORK_DIR}/redis-tests"
+        REDIS_TEST_TREE="${REDIS_RUN_ROOT}/tests"
     else
-        SOURCE_DIR="${PERF_WORK_DIR}/redis-source"
+        SOURCE_DIR="${REDIS_RUN_ROOT}/source"
         REDIS_SERVER_BIN="${SOURCE_DIR}/src/redis-server"
         REDIS_CLI_BIN="${SOURCE_DIR}/src/redis-cli"
         REDIS_TEST_TREE="${SOURCE_DIR}"
@@ -127,12 +134,12 @@ configure_runtime_paths() {
 
     export SOFTWARE_NAME CATEGORY SOFTWARE_VERSION EXPECTED_ARCH FUNC_OS FUNC_HARDWARE FUNC_MODE
     export PERF_RUN_ID PERF_WORK_DIR RESULTS_DIR PERF_ACTUAL_VERSION_FILE TMPDIR
-    export REDIS_SERVICE_PORT REDIS_SOURCE_DIR REDIS_TEST_TREE
+    export REDIS_SERVICE_PORT REDIS_SOURCE_DIR REDIS_TEST_TREE REDIS_RUN_ROOT
 }
 
 initialize_runtime() {
     configure_runtime_paths || return $?
-    mkdir -p "${RESULTS_DIR}" "${PERF_WORK_DIR}" "${TMPDIR}"
+    mkdir -p "${RESULTS_DIR}" "${PERF_WORK_DIR}" "${TMPDIR}" "${REDIS_RUN_ROOT}"
 }
 
 # 定位上游 Tcl 套件所需的 redis 源码树(必须含 ./runtest)。

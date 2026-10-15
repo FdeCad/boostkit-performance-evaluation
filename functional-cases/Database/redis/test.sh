@@ -136,6 +136,10 @@ func_cleanup() {
         kill -KILL "${pid}" 2>/dev/null || true
     fi
     [[ -d "${SERVICE_DIR}" ]] && rm -rf -- "${SERVICE_DIR}"
+    # 删除本次运行的短路径工作树(仅限约定前缀,避免误删)。
+    if [[ -n "${REDIS_RUN_ROOT:-}" && "${REDIS_RUN_ROOT}" == /tmp/redis-func-* && -d "${REDIS_RUN_ROOT}" ]]; then
+        rm -rf -- "${REDIS_RUN_ROOT}"
+    fi
     log "cleaned redis task data"
 }
 
