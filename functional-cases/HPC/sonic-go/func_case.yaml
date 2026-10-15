@@ -1,0 +1,52 @@
+# sonic-go 功能测试清单。
+# 独立于性能测试框架;版本由人工指定,不做 latest 解析。
+name: sonic-go
+category: HPC
+enabled: true
+
+# build 模式(ubuntu 基础镜像内)分层优先获取:层1 经 GOPROXY 按精确版本拉取 Go module →
+#   层3 git 源码 tag(兜底);每层获取后都校验版本 == 1.15.2。
+
+# 人工指定的待测版本(白名单),与 software/HPC/sonic-go/case.yaml 保持一致。
+versions:
+  - "1.15.2"
+
+execution:
+  type: shell-functions
+  stages:
+    prepare:
+      script: build.sh
+      function: func_prepare
+    install:
+      script: build.sh
+      function: func_install
+    check:
+      script: test.sh
+      function: func_check
+    cleanup:
+      script: test.sh
+      function: func_cleanup
+  timeout_minutes: 180
+
+# 功能判定项,名称与 functional_result.json 中 checks[].name 一一对应。
+checks:
+  - name: version
+    description: 获取到的源码版本(Go module 版本或 git tag)必须严格等于请求版本
+  # sonic-go 是 Go module;上游自带的 go test 用例即官方测试套件。
+  - name: upstream-test
+    description: 运行 sonic 自带 Go 单元测试(核心包与 ast 包)
+    upstream_command: go test . ./ast/...
+  - name: marshal-roundtrip
+    description: 使用 sonic.Marshal/Unmarshal 做 JSON 编解码回环校验
+
+outputs:
+  functional_result:
+    path: functional_result.json
+    stage: check
+    format: json
+    required: true
+  sonic_go_test_log:
+    path: sonic_go_test.log
+    stage: check
+    format: text
+    required: true

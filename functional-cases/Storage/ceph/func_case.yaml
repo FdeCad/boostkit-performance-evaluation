@@ -1,0 +1,58 @@
+# ⚠ 版本为推断,需人工确认。
+# 下列 Ceph 版本(19.2.6)由编写者依据官方文档 https://docs.ceph.com/en/latest/releases/
+# 选取的当前稳定发行线 squid(19.2.x)最新补丁版;config/distribution.yaml 未固定版本。
+# 合入前请人工确认该版本存在于所用发行套件仓库(debian-squid / 发行版仓库),并按需调整。
+#
+# Ceph 功能测试清单。
+name: ceph
+category: Storage
+enabled: true
+
+# 人工指定的待测版本(白名单)。19.2.6 为 squid release 线的最新补丁版。
+versions:
+  - "19.2.6"
+
+# build 模式(FUNC_MODE=build)软件获取为分层优先:1) 上游官方二进制 tarball 2) 厂商/发行版
+# 仓库中版本一致的包 3) 源码编译。Ceph 官方无二进制 tarball(仅源码 tarball),官方镜像
+# quay.io/ceph/ceph 因 build 模式无嵌套 docker 不可用,故实际以官方仓库包等效,最后退源码编译;
+# 每层均用 ceph --version 校验版本。
+
+execution:
+  type: shell-functions
+  stages:
+    prepare:
+      script: build.sh
+      function: func_prepare
+    install:
+      script: build.sh
+      function: func_install
+    check:
+      script: test.sh
+      function: func_check
+    cleanup:
+      script: test.sh
+      function: func_cleanup
+  timeout_minutes: 120
+
+# 功能判定项,名称与 functional_result.json 中 checks[].name 一一对应。
+# 判定来源:上游离线自检工具 + 最小可用性(完整集群引导很重,详见 detail)。
+checks:
+  - name: version
+    description: ceph --version 必须等于请求版本
+  - name: upstream-test
+    description: 运行上游自带离线自检工具 ceph-dencoder 与 monmaptool
+    upstream_command: ceph-dencoder types list
+  - name: cluster-smoke
+    description: 最小可用性冒烟,校验 ceph-mon/ceph-osd/ceph-mgr 二进制可执行(不引导完整集群)
+
+outputs:
+  functional_result:
+    path: functional_result.json
+    stage: check
+    format: json
+    required: true
+  smoke_log:
+    path: ceph_smoke.log
+    stage: check
+    format: text
+    required: true

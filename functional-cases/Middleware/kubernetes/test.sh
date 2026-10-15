@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+# Kubernetes 测试脚本:功能判定 + 收尾。
+# 判定:版本校验 + kubectl 客户端侧 YAML 校验(apply --dry-run=client) + 内置资源生成 smoke。
+# 无需真实集群:全部使用 client 侧 dry-run。
+# 暴露给 Framework 的阶段:check、cleanup。独立执行时依次运行这两个阶段。
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=common.sh
+source "${SCRIPT_DIR}/common.sh"
+
+# ---------- 阶段:check ----------
+
+# 写出一段内置 YAML(Deployment + Service),用于 client 侧 dry-run 校验。
+write_manifest() {
+    mkdir -p "${KUBECTL_WORK_DIR}" || return 40
+    cat >"${KUBECTL_WORK_DIR}/manifest.yaml" <<'YAML'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: func-smoke
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: func-smoke
+  template:
+    metadata:
+      labels:
+        app: func-smoke
+    spec:
+      containers:
+        - name: app
+          image: nginx:alpine
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: func-smoke
+  namespace: default
+spec:
+  selector:
+    app: func-smoke
+  ports:
+    - port: 80
+      targetPort: 80
+YAML
+}
+
+# 上游客户端功能:对内置 YAML 做 client 侧 schema/对象校验。
+run_apply_dry_run() {
+    "${KUBECTL_BIN}" apply --dry-run=client --validate=false \
+        -f "${KUBECTL_WORK_DIR}/manifest.yaml"
+}
+
+# 基础 smoke:用 kubectl create 生成资源 YAML,再回喂 apply 做 client 侧校验。
+run_kubectl_smoke() {
+    local generated="${KUBECTL_WORK_DIR}/generated.yaml"
+    "${KUBECTL_BIN}" create configmap func-smoke \
+        --from-literal=key=value --dry-run=client -o yaml >"${generated}" || return 40
+    grep -q 'name: func-smoke' "${generated}" || return 40
+    "${KUBECTL_BIN}" apply --dry-run=client --validate=false -f "${generated}"
+}
+
+write_functional_result() {
+    local overall="$1" v_status="$2" v_detail="$3" u_status="$4" u_detail="$5" c_status="$6" c_detail="$7"
+    FUNC_OVERALL="${overall}" \
+        FUNC_V_STATUS="${v_status}" FUNC_V_DETAIL="${v_detail}" \
+        FUNC_U_STATUS="${u_status}" FUNC_U_DETAIL="${u_detail}" \
+        FUNC_C_STATUS="${c_status}" FUNC_C_DETAIL="${c_detail}" \
+        python3 - "${RESULTS_DIR}/functional_result.json" <<'PY'
+import json, os, sys
+
+out = sys.argv[1]
+env = os.environ.get
+payload = {
+    "software": env("SOFTWARE_NAME"),
+    "category": env("CATEGORY"),
+    "version": env("SOFTWARE_VERSION"),
+    "os": env("FUNC_OS"),
+    "mode": env("FUNC_MODE"),
+    "hardware": env("FUNC_HARDWARE") or None,
+    "architecture": env("EXPECTED_ARCH"),
+    "run_id": env("PERF_RUN_ID"),
+    "status": env("FUNC_OVERALL"),
+    "checks": [
+        {"name": "version", "status": env("FUNC_V_STATUS"), "detail": env("FUNC_V_DETAIL")},
+        {"name": "upstream-test", "status": env("FUNC_U_STATUS"), "detail": env("FUNC_U_DETAIL")},
+        {"name": "kubectl-smoke", "status": env("FUNC_C_STATUS"), "detail": env("FUNC_C_DETAIL")},
+    ],
+}
+tmp = out + ".tmp"
+with open(tmp, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+os.replace(tmp, out)
+PY
+}
+
+func_check() {
+    initialize_runtime || return $?
+    [[ -x "${KUBECTL_BIN}" ]] || {
+        log "ERROR: kubectl client is unavailable"
+        return 40
+    }
+    write_manifest || return $?
+
+    local version_status="failed" version_detail=""
+    local upstream_status="failed" upstream_detail=""
+    local smoke_status="failed" smoke_detail=""
+    local actual
+
+    # 1) 版本
+    actual="$(read_kubectl_version || true)"
+    if [[ "${actual}" == "${SOFTWARE_VERSION}" ]]; then
+        version_status="passed"
+        version_detail="client version=v${actual}"
+    else
+        version_detail="kubectl client ${actual:-unknown}, expected ${SOFTWARE_VERSION}"
+    fi
+
+    # 2) 上游客户端功能:apply --dry-run=client
+    if run_apply_dry_run >"${RESULTS_DIR}/upstream_apply.log" 2>&1; then
+        upstream_status="passed"
+        upstream_detail="kubectl apply --dry-run=client validated the built-in manifest"
+    else
+        upstream_detail="kubectl apply --dry-run=client failed; see upstream_apply.log"
+    fi
+
+    # 3) 基础 smoke:create -> apply 回喂
+    if run_kubectl_smoke >"${RESULTS_DIR}/kubectl_smoke.log" 2>&1; then
+        smoke_status="passed"
+        smoke_detail="kubectl create + apply --dry-run=client roundtrip ok"
+    else
+        smoke_detail="kubectl create/apply smoke failed; see kubectl_smoke.log"
+    fi
+
+    local overall="passed"
+    if [[ "${version_status}" != "passed" || "${upstream_status}" != "passed" || "${smoke_status}" != "passed" ]]; then
+        overall="failed"
+    fi
+    write_functional_result "${overall}" \
+        "${version_status}" "${version_detail}" \
+        "${upstream_status}" "${upstream_detail}" \
+        "${smoke_status}" "${smoke_detail}"
+    {
+        printf 'kubernetes functional check (version %s, mode %s)\n' "${SOFTWARE_VERSION}" "${FUNC_MODE}"
+        printf 'version:  %s - %s\n' "${version_status}" "${version_detail}"
+        printf 'upstream: %s - %s\n' "${upstream_status}" "${upstream_detail}"
+        printf 'smoke:    %s - %s\n' "${smoke_status}" "${smoke_detail}"
+        printf 'overall:  %s\n' "${overall}"
+    } >"${RESULTS_DIR}/check.log"
+    log "checks: version=${version_status} upstream=${upstream_status} smoke=${smoke_status}"
+
+    [[ "${overall}" == "passed" ]] || return 50
+}
+
+# ---------- 阶段:cleanup ----------
+
+func_cleanup() {
+    initialize_runtime || return $?
+    [[ -d "${KUBECTL_WORK_DIR}" ]] && rm -rf -- "${KUBECTL_WORK_DIR}"
+    log "cleaned kubernetes task data"
+}
+
+# ---------- 独立运行入口 ----------
+
+cleanup_standalone_workdir() {
+    if [[ "${STANDALONE_KEEP_WORK_DIR}" -eq 1 ]]; then
+        log "keeping work directory: ${PERF_WORK_DIR}"
+        return 0
+    fi
+    [[ "${STANDALONE_OWNS_WORK_DIR}" -eq 1 ]] || return 0
+    [[ "${PERF_WORK_DIR}" == /home/runner/boostkit-func/${SOFTWARE_NAME}/local-* ]] || {
+        log "ERROR: refusing to remove unexpected work directory: ${PERF_WORK_DIR}"
+        return 70
+    }
+    [[ -d "${PERF_WORK_DIR}" ]] && rm -rf -- "${PERF_WORK_DIR}"
+    log "removed standalone work directory: ${PERF_WORK_DIR}"
+}
+
+emergency_cleanup() {
+    set +e
+    func_cleanup
+    cleanup_standalone_workdir
+}
+
+usage() {
+    cat <<USAGE
+Usage: $(basename "$0") [OPTIONS]
+Run the kubernetes functional checks and clean up for one OS/hardware cell.
+
+Options:
+  --version VERSION    Kubernetes release version (default: ${SOFTWARE_VERSION})
+  --results-dir DIR    Persistent result directory
+  --os OS_LABEL        OS label (default: detect from /etc/os-release)
+  --hardware HW_LABEL  Hardware label, e.g. kunpeng920
+  --mode MODE          prebuilt | build (default: ${FUNC_MODE})
+  --keep-workdir       Keep the isolated work directory
+  -h, --help           Show this help
+USAGE
+}
+
+run_test_standalone() {
+    local stage_status=0 failed_stage="" finalize_status=0
+
+    configure_runtime_paths || return $?
+    trap emergency_cleanup EXIT
+    initialize_runtime || return $?
+
+    func_check || {
+        stage_status=$?
+        failed_stage="check"
+    }
+    func_cleanup || true
+    cleanup_standalone_workdir || finalize_status=70
+    trap - EXIT
+
+    log "standalone results: ${RESULTS_DIR}"
+    if [[ "${stage_status}" -ne 0 ]]; then
+        log "standalone failed at stage: ${failed_stage}"
+        return "${stage_status}"
+    fi
+    return "${finalize_status}"
+}
+
+main() {
+    parse_common_args "$@"
+    case "$?" in
+        0) ;;
+        64)
+            usage
+            return 0
+            ;;
+        *) return 10 ;;
+    esac
+    mkdir -p "${RESULTS_DIR:-${SCRIPT_DIR}/results}" || return $?
+    run_test_standalone
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
