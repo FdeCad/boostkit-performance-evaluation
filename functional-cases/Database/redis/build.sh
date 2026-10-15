@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Redis 构建脚本:环境采集 + 准备被测软件(构建或校验)。
-#   FUNC_MODE=prebuilt - 只校验镜像内已装好的 redis 版本
+#   FUNC_MODE=prebuilt - 校验镜像内 redis 版本,浅克隆上游测试脚本并软链镜像内二进制
 #   FUNC_MODE=build    - 装依赖 + 克隆源码 + 编译
 # 暴露给 Framework 的阶段:prepare、install。独立执行时依次运行这两个阶段。
 set -euo pipefail
@@ -38,13 +38,53 @@ EOF
 
 # ---------- 阶段:install ----------
 
+# 把镜像/PATH 中已有的 redis 二进制软链进测试树的 src/,
+# 让上游 ./runtest 的本地模式能从树里拉起 redis-server(不依赖镜像内置源码)。
+link_redis_binaries() {
+    local tree="$1" name path
+    local src_dir="${tree}/src"
+    mkdir -p "${src_dir}"
+    for name in redis-server redis-cli redis-benchmark redis-sentinel redis-check-rdb redis-check-aof; do
+        path="$(command -v "${name}" 2>/dev/null || true)"
+        [[ -n "${path}" ]] || continue
+        ln -sf "${path}" "${src_dir}/${name}"
+    done
+    [[ -x "${src_dir}/redis-server" && -x "${src_dir}/redis-cli" ]] || {
+        log "ERROR: redis binaries not found on PATH to link into ${src_dir}"
+        return 40
+    }
+}
+
+# prebuilt 模式:镜像只提供二进制,测试脚本需当场浅克隆上游源码仓库(只为拿 ./runtest 与 tests/)。
+install_redis_test_tree() {
+    local tree="${REDIS_TEST_TREE}"
+    command -v git >/dev/null 2>&1 || {
+        log "ERROR: git is required to fetch the upstream test suite"
+        return 40
+    }
+    rm -rf -- "${tree}"
+    mkdir -p "${tree}"
+    log "cloning redis test suite (tag ${SOFTWARE_VERSION}) from ${REDIS_SOURCE_URL}"
+    GIT_TERMINAL_PROMPT=0 git clone --branch "${SOFTWARE_VERSION}" --depth 1 \
+        "${REDIS_SOURCE_URL}" "${tree}" || {
+        log "ERROR: failed to clone redis test suite for ${SOFTWARE_VERSION}"
+        return 30
+    }
+    [[ -f "${tree}/runtest" ]] || {
+        log "ERROR: runtest not found in the cloned test suite"
+        return 40
+    }
+    link_redis_binaries "${tree}" || return $?
+    log "redis test tree ready at ${tree}"
+}
+
 func_install() {
     initialize_runtime || return $?
     check_architecture || return $?
 
     local actual
     if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
-        # 镜像已装好:只校验版本,不构建。
+        # 镜像已装好:校验版本,并浅克隆测试脚本 + 软链镜像内二进制。
         [[ -x "${REDIS_SERVER_BIN}" ]] || {
             log "ERROR: redis-server is not present in the software image"
             return 40
@@ -53,6 +93,8 @@ func_install() {
             log "ERROR: redis-cli is not present in the software image"
             return 40
         }
+        require_test_commands || return $?
+        install_redis_test_tree || return $?
     else
         # 当场构建:装依赖,克隆源码,编译。
         require_build_commands || return $?

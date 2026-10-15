@@ -75,9 +75,9 @@ func_check() {
     local version_status="failed" version_detail=""
     local upstream_status="failed" upstream_detail=""
     local cli_status="failed" cli_detail=""
+    local actual source_dir
 
     # 1) 版本
-    local actual
     actual="$("${REDIS_SERVER_BIN}" --version | sed -n 's/.*v=\([^ ]*\).*/\1/p' | head -n 1)"
     if [[ "${actual}" == "${SOFTWARE_VERSION}" ]]; then
         version_status="passed"
@@ -86,13 +86,14 @@ func_check() {
         version_detail="redis ${actual:-unknown}, expected ${SOFTWARE_VERSION}"
     fi
 
-    # 2) 上游测试套件
-    if [[ ! -d "${REDIS_SOURCE_DIR}" ]]; then
-        upstream_detail="source directory not found: ${REDIS_SOURCE_DIR}"
-    elif (cd "${REDIS_SOURCE_DIR}" && ./runtest --single "${REDIS_UPSTREAM_TEST}" --clients 5) \
+    # 2) 上游测试套件(测试树由 install 阶段准备:prebuilt=浅克隆测试脚本+软链二进制,build=本次克隆目录)
+    source_dir="$(resolve_redis_source_dir || true)"
+    if [[ -z "${source_dir}" ]]; then
+        upstream_detail="test tree with ./runtest not found (searched REDIS_TEST_TREE=${REDIS_TEST_TREE:-unset}, REDIS_SOURCE_DIR=${REDIS_SOURCE_DIR:-unset}); did the install stage clone the test suite?"
+    elif (cd "${source_dir}" && ./runtest --single "${REDIS_UPSTREAM_TEST}" --clients 5) \
         >"${RESULTS_DIR}/upstream_test.log" 2>&1; then
         upstream_status="passed"
-        upstream_detail="upstream suite '${REDIS_UPSTREAM_TEST}' passed"
+        upstream_detail="upstream suite '${REDIS_UPSTREAM_TEST}' passed (source: ${source_dir})"
     else
         upstream_detail="upstream suite '${REDIS_UPSTREAM_TEST}' failed; see upstream_test.log"
     fi

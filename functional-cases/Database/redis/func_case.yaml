@@ -31,6 +31,10 @@ execution:
 checks:
   - name: version
     description: 构建产物版本必须等于请求版本
+  # 上游套件需要 redis 源码树(目录内必须含 ./runtest)。
+  # install 阶段负责准备测试树:prebuilt 模式浅克隆上游测试脚本并把镜像内二进制软链到树的 src/,
+  # build 模式用本次克隆并编译出的源码目录。可用 REDIS_SOURCE_DIR 显式覆盖(镜像已内置源码树时)。
+  # 找不到测试树即判该项失败。
   - name: upstream-test
     description: 运行上游 Redis Tcl 测试套件 unit/type/string
     upstream_command: ./runtest --single unit/type/string --clients 5
