@@ -6,7 +6,7 @@ enabled: true
 
 # 人工指定的待测版本(白名单),与 software/AI/pytorch/case.yaml 保持一致。
 versions:
-  - "2.13.0"
+  - "2.14.1"
 
 execution:
   type: shell-functions
