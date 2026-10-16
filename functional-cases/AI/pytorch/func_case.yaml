@@ -4,7 +4,8 @@ name: pytorch
 category: AI
 enabled: true
 
-# 人工指定的待测版本(白名单),与 software/AI/pytorch/case.yaml 保持一致。
+# 人工指定的待测版本(白名单),由人工维护;
+# 不要求与 software/AI/pytorch/case.yaml 一致,可含更高或额外版本。
 versions:
   - "2.14.1"
 
