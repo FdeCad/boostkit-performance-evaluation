@@ -18,6 +18,9 @@ from typing import Any, TextIO
 from catalog_func import FUNC_STAGES, ROOT, compose_image, load_config, validate_case
 
 STAGE_EXIT_CODES = {"prepare": 20, "install": 30, "check": 50, "cleanup": 70}
+# check 阶段的脚本用 python3 汇总 functional_result.json;部分基础镜像(如 ubuntu:26.04)
+# 并不自带 python3,所以在容器里做一层框架级兜底,缺失时按发行版装好。
+CHECK_STAGE_TOOLS = ("python3",)
 FORWARD_ENV_KEYS = (
     "SOFTWARE_VERSION",
     "EXPECTED_ARCH",
@@ -273,6 +276,35 @@ def _remove_container(context: CellContext) -> None:
     )
 
 
+def _container_tool_present(engine: str, name: str, tool: str) -> bool:
+    probe = subprocess.run(
+        [engine, "exec", name, "sh", "-c", f"command -v {tool} >/dev/null 2>&1"],
+        capture_output=True, text=True,
+    )
+    return probe.returncode == 0
+
+
+def _ensure_container_tools(engine: str, name: str, tools: tuple[str, ...]) -> None:
+    """Install stage tools that the image does not ship, using its own package manager."""
+    missing = [tool for tool in tools if not _container_tool_present(engine, name, tool)]
+    if not missing:
+        return
+    print(f"[cell] container {name} is missing {', '.join(missing)}; installing", flush=True)
+    probe = subprocess.run(
+        [engine, "exec", name, "sh", "-c", "sed -n 's/^ID=//p' /etc/os-release"],
+        capture_output=True, text=True,
+    )
+    os_id = probe.stdout.strip().strip('"').lower()
+    packages = " ".join(missing)
+    if os_id in {"ubuntu", "debian"}:
+        install = f"apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y {packages}"
+    else:
+        install = f"dnf install -y {packages}"
+    result = subprocess.run([engine, "exec", name, "sh", "-c", install])
+    if result.returncode != 0:
+        raise RuntimeError(f"failed to install {', '.join(missing)} in container {name}")
+
+
 def _container_exec_command(
     context: CellContext, name: str, script: Path, function: str, environment: dict[str, str]
 ) -> list[str]:
@@ -300,6 +332,8 @@ def run_stage(context: CellContext, stage: str, timeout_minutes: float) -> int:
     environment = stage_environment(context)
     if context.os_runtime == "container":
         name = _ensure_container(context, environment)
+        if stage == "check":
+            _ensure_container_tools(_container_engine(), name, CHECK_STAGE_TOOLS)
         command = _container_exec_command(context, name, script, function, environment)
         process_env = dict(os.environ)
     else:

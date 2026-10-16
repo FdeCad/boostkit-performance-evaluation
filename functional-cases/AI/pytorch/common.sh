@@ -102,6 +102,7 @@ configure_runtime_paths() {
     # prebuilt 模式:软件已装好在镜像里,直接定位镜像内 python3 校验版本,不安装;
     # build 模式:装到本次任务私有的虚拟环境,避免污染系统 Python。
     VENV_DIR="${PERF_WORK_DIR}/${SOFTWARE_NAME}-venv"
+    BUILD_DIR="${PERF_WORK_DIR}/${SOFTWARE_NAME}-build"
     if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
         PYBIN="$(command -v python3 2>/dev/null || true)"
     else
