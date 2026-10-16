@@ -6,7 +6,7 @@ enabled: true
 
 # 人工指定的待测版本(白名单),与 software/Toolchain/python/case.yaml 一致。
 versions:
-  - "3.14.7"
+  - "3.15.0"
 
 execution:
   type: shell-functions

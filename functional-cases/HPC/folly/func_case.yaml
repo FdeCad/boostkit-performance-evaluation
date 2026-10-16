@@ -6,7 +6,7 @@ enabled: true
 
 # 人工指定的待测版本(白名单),对应上游 tag v<version>。
 versions:
-  - "2026.08.17.00"
+  - "2026.10.12.00"
 
 execution:
   type: shell-functions

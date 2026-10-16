@@ -6,7 +6,7 @@ enabled: true
 
 # 人工指定的待测版本(白名单),与 software/Toolchain/gcc/case.yaml 一致。
 versions:
-  - "14.4.0"
+  - "16.2.0"
 
 execution:
   type: shell-functions

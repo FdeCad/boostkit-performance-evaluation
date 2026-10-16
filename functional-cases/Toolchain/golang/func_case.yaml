@@ -6,7 +6,7 @@ enabled: true
 
 # 人工指定的待测版本(白名单),与 software/Toolchain/golang/case.yaml 一致。
 versions:
-  - "1.26.7"
+  - "1.26.9"
   - "1.27.0"
 
 execution:

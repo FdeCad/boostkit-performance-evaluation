@@ -6,7 +6,7 @@ enabled: true
 
 # 人工指定的待测版本(白名单),与 software/AI/openviking/case.yaml 保持一致。
 versions:
-  - "0.4.17.1"
+  - "0.5.0"
 
 execution:
   type: shell-functions

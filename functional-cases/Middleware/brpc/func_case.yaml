@@ -6,7 +6,7 @@ enabled: true
 
 # 人工指定的待测版本:与性能用例 software/Middleware/brpc/case.yaml 保持一致。
 versions:
-  - "1.17.0"
+  - "1.18.0"
 
 execution:
   type: shell-functions

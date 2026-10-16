@@ -6,7 +6,7 @@ enabled: true
 
 # 人工指定的待测版本(白名单),与 software/Database/mysql/case.yaml 保持一致。
 versions:
-  - "8.0.43"
+  - "26.7.0"
 
 execution:
   type: shell-functions

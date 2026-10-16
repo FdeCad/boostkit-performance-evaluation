@@ -9,7 +9,7 @@ enabled: true
 
 # 人工指定的待测版本(白名单),与 software/HPC/protobuf/case.yaml 保持一致。
 versions:
-  - "33.0"
+  - "36.2"
 
 execution:
   type: shell-functions

@@ -6,7 +6,7 @@ enabled: true
 
 # 人工指定的待测版本(白名单),与 software/Toolchain/glibc/case.yaml 一致。
 versions:
-  - "2.31"
+  - "2.42.9000"
 
 execution:
   type: shell-functions

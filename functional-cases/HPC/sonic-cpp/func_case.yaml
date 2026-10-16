@@ -6,7 +6,7 @@ enabled: true
 
 # 人工指定的待测源码提交(短哈希),与 software/HPC/sonic-cpp/case.yaml 保持一致。
 versions:
-  - "69deb02"
+  - "1.0.2"
 
 execution:
   type: shell-functions
