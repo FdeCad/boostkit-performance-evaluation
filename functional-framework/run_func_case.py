@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -21,6 +22,9 @@ STAGE_EXIT_CODES = {"prepare": 20, "install": 30, "check": 50, "cleanup": 70}
 # check 阶段的脚本用 python3 汇总 functional_result.json;部分基础镜像(如 ubuntu:26.04)
 # 并不自带 python3,所以在容器里做一层框架级兜底,缺失时按发行版装好。
 CHECK_STAGE_TOOLS = ("python3",)
+# 磁盘预检阈值:低于此值直接判失败,避免 apt/构建中途因空间耗尽报出难懂的错误。
+MIN_FREE_DISK_BYTES = 5 * 1024 ** 3
+DISK_EXIT_CODE = 91
 FORWARD_ENV_KEYS = (
     "SOFTWARE_VERSION",
     "EXPECTED_ARCH",
@@ -66,6 +70,7 @@ class CellContext:
     run_id: str
     output_dir: Path
     work_dir: Path
+    work_root: Path
 
     @property
     def case_dir(self) -> Path:
@@ -123,8 +128,9 @@ def build_context(args: argparse.Namespace, case: dict[str, Any], config: dict[s
         ROOT / config["output_root"] / category / software / args.version
         / args.os / args.hardware / args.run_id
     )
+    work_root = Path(config["work_root"])
     work_dir = (
-        Path(config["work_root"]) / software / args.version
+        work_root / software / args.version
         / args.os / args.hardware / args.run_id
     )
     return CellContext(
@@ -143,6 +149,7 @@ def build_context(args: argparse.Namespace, case: dict[str, Any], config: dict[s
         run_id=args.run_id,
         output_dir=output_dir,
         work_dir=work_dir,
+        work_root=work_root,
     )
 
 
@@ -273,6 +280,44 @@ def _remove_container(context: CellContext) -> None:
     subprocess.run(
         [_container_engine(), "rm", "-f", _container_name(context)],
         capture_output=True, text=True,
+    )
+
+
+def _remove_work_dir(context: CellContext) -> None:
+    """Reclaim the cell work directory; every artifact lives in the output directory."""
+    parts = (
+        context.software, context.version, context.operating_system,
+        context.hardware, context.run_id,
+    )
+    root = context.work_root.resolve()
+    target = context.work_dir.resolve()
+    # 只删工作根下、由这五个已知字段拼出的那一层,任何异常一律不删。
+    if (
+        any(
+            not part or part in {".", ".."} or "/" in part or "\\" in part
+            for part in parts
+        )
+        or target != root.joinpath(*parts).resolve()
+        or target == root
+        or root not in target.parents
+    ):
+        print(f"[cell] refusing to remove unexpected work directory: {target}", flush=True)
+        return
+    if not target.is_dir():
+        return
+    shutil.rmtree(target, ignore_errors=True)
+    print(f"[cell] removed work directory {target}", flush=True)
+
+
+def _preflight_disk(context: CellContext) -> None:
+    """Fail fast with an actionable message when the runner is nearly out of space."""
+    usage = shutil.disk_usage(context.work_dir)
+    if usage.free >= MIN_FREE_DISK_BYTES:
+        return
+    raise RuntimeError(
+        f"only {usage.free // (1024 * 1024)} MiB free on the filesystem backing "
+        f"{context.work_dir}, but at least {MIN_FREE_DISK_BYTES // (1024 ** 3)} GiB is required; "
+        "prune the runner (docker system prune -af, clear the work root) and retry"
     )
 
 
@@ -505,11 +550,26 @@ def main() -> int:
     )
     write_status(context, status="running", stage=args.stage)
 
+    if args.stage == "prepare":
+        # 每个 cell 的 job 从 prepare 开始,在这里做一次磁盘预检。
+        try:
+            _preflight_disk(context)
+        except RuntimeError as exc:
+            write_status(
+                context, status="failed", stage=args.stage, failed_stage=args.stage,
+                exit_code=DISK_EXIT_CODE, error=str(exc),
+            )
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return DISK_EXIT_CODE
+
     returncode = run_stage(context, args.stage, timeout_minutes)
     print(f"[cell] stage {args.stage} exited with code {returncode}", flush=True)
 
-    if args.stage == "cleanup" and context.os_runtime == "container":
-        _remove_container(context)
+    if args.stage == "cleanup":
+        if context.os_runtime == "container":
+            _remove_container(context)
+        # 无论 cleanup 是否成功都回收工作目录,否则跑一轮 all 就会把 runner 撑满。
+        _remove_work_dir(context)
 
     if returncode != 0:
         write_status(
