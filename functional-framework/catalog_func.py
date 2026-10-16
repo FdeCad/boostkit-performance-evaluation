@@ -212,7 +212,7 @@ def validate_case(
     if not isinstance(execution, dict):
         errors.append("execution must be a mapping")
     else:
-        unknown = set(execution) - {"type", "stages", "timeout_minutes"}
+        unknown = set(execution) - {"type", "stages", "timeout_minutes", "min_free_disk_gb"}
         if unknown:
             errors.append(
                 "execution contains unsupported fields: "
@@ -272,6 +272,14 @@ def validate_case(
         timeout = execution.get("timeout_minutes")
         if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
             errors.append("execution.timeout_minutes must be a positive integer")
+        # 可选:该软件 build 模式所需的磁盘下限(GiB),缺省用框架默认值。
+        min_free_disk = execution.get("min_free_disk_gb")
+        if min_free_disk is not None and (
+            not isinstance(min_free_disk, (int, float))
+            or isinstance(min_free_disk, bool)
+            or min_free_disk <= 0
+        ):
+            errors.append("execution.min_free_disk_gb must be a positive number")
 
     _validate_checks(case.get("checks"), errors)
 

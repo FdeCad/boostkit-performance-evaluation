@@ -25,6 +25,8 @@ execution:
       function: func_cleanup
   # 分层获取(上游无官方二进制 → 三方仓库包 → 源码编译 db_bench)+ 烟测,120 分钟足够。
   timeout_minutes: 120
+  # 源码编译 db_bench(含压缩库依赖)。
+  min_free_disk_gb: 8
 
 # 功能判定项,名称与 functional_result.json 中 checks[].name 一一对应。
 # RocksDB 为嵌入式 C++ 库,无服务端:以版本 + 上游 db_bench 工具 + 自编译 API 烟测判定。

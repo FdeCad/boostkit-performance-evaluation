@@ -24,6 +24,8 @@ execution:
       script: test.sh
       function: func_cleanup
   timeout_minutes: 60
+  # arm64 无 wheel,回退源码编译。
+  min_free_disk_gb: 6
 
 # 功能判定项,名称与 functional_result.json 中 checks[].name 一一对应。
 # 判定来源:版本校验 + 两个基于官方 scann_ops_pybind 索引构建 API 的功能 smoke。

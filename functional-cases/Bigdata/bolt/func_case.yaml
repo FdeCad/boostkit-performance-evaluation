@@ -33,6 +33,8 @@ execution:
       function: func_cleanup
   # Bolt 首次构建会用 Conan 从源码编译全部依赖(LLVM/Arrow 等),非常重。
   timeout_minutes: 300
+  # Conan + CMake 完整构建 C++ 引擎,依赖与中间产物很大。
+  min_free_disk_gb: 16
 
 # 功能判定项,名称与 functional_result.json 中 checks[].name 一一对应。
 # 判定来源:优先复用上游自带 gtest 单测子集;不可行时退化为构建产物链接冒烟。

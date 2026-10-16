@@ -25,6 +25,8 @@ execution:
       function: func_cleanup
   # 分层获取(官方二进制 → 发行版仓库包 → 源码编译)+ 初始化一次性实例并跑烟测,60 分钟足够。
   timeout_minutes: 60
+  # 源码编译 MySQL 需要 CMake 构建出完整服务端,体量很大。
+  min_free_disk_gb: 12
 
 # 功能判定项,名称与 functional_result.json 中 checks[].name 一一对应。
 checks:

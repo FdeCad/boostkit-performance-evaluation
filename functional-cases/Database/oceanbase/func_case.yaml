@@ -25,6 +25,8 @@ execution:
       function: func_cleanup
   # 分层获取(官方二进制 obd 拉包 → 三方仓库 → 源码编译)+ 最小可用性验证,90 分钟足够。
   timeout_minutes: 90
+  # 经 obd 拉取并部署 observer,下载与部署产物较大。
+  min_free_disk_gb: 10
 
 # 功能判定项,名称与 functional_result.json 中 checks[].name 一一对应。
 # OceanBase 为部署服务型软件、集群较重,无轻量自带测试套件:

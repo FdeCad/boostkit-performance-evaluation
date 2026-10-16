@@ -25,6 +25,8 @@ execution:
       function: func_cleanup
   # 分层获取:上游二进制/仓库包不可行,最终以源码 cmake 构建 brpc 库 + 编译 example,较重,给足时间。
   timeout_minutes: 180
+  # CMake 源码构建 libbrpc,依赖 gflags/leveldb/protobuf 等。
+  min_free_disk_gb: 8
 
 # 功能判定项,名称与 functional_result.json 中 checks[].name 一一对应。
 # 判定来源:优先复用上游 example,不足时用内部 smoke 补齐。

@@ -22,8 +22,10 @@ STAGE_EXIT_CODES = {"prepare": 20, "install": 30, "check": 50, "cleanup": 70}
 # check 阶段的脚本用 python3 汇总 functional_result.json;部分基础镜像(如 ubuntu:26.04)
 # 并不自带 python3,所以在容器里做一层框架级兜底,缺失时按发行版装好。
 CHECK_STAGE_TOOLS = ("python3",)
-# 磁盘预检阈值:低于此值直接判失败,避免 apt/构建中途因空间耗尽报出难懂的错误。
-MIN_FREE_DISK_BYTES = 5 * 1024 ** 3
+# 磁盘预检:低于阈值直接失败,避免 apt/构建中途因空间耗尽报出难懂的错误。
+# 源码编译类软件(如 pytorch/gcc/ceph)远超这个默认值,由各 func_case.yaml 的
+# execution.min_free_disk_gb 单独声明;这里是未声明时的兜底。
+DEFAULT_MIN_FREE_DISK_BYTES = 5 * 1024 ** 3
 DISK_EXIT_CODE = 91
 FORWARD_ENV_KEYS = (
     "SOFTWARE_VERSION",
@@ -191,9 +193,14 @@ def _container_name(context: CellContext) -> str:
     return "".join(char if (char.isalnum() or char in "_.-") else "-" for char in raw)
 
 
-def _ensure_image(image: str) -> None:
-    """Use the local image when present; otherwise pull it from the registry."""
+def _pulled_image_marker(context: CellContext) -> Path:
+    return context.work_dir / ".pulled-image"
+
+
+def _ensure_image(context: CellContext) -> None:
+    """Use the local image when present; otherwise pull it and record that we did."""
     engine = _container_engine()
+    image = context.image
     local = subprocess.run(
         [engine, "image", "inspect", image], capture_output=True, text=True
     )
@@ -204,6 +211,31 @@ def _ensure_image(image: str) -> None:
     pull = subprocess.run([engine, "pull", image])
     if pull.returncode != 0:
         raise RuntimeError(f"failed to pull image {image} (exit code {pull.returncode})")
+    # 四个阶段是四个进程,用标记文件把"本次真的拉过"传给 cleanup 阶段。
+    marker = _pulled_image_marker(context)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(f"{image}\n", encoding="utf-8")
+
+
+def _remove_pulled_image(context: CellContext) -> None:
+    """Drop the image this cell pulled; never touch a shared build-mode base image."""
+    if context.mode != "prebuilt":
+        # build 模式用的是配置里的共享基础镜像(如 ubuntu:26.04),删掉会让其他 cell 重新拉取。
+        return
+    marker = _pulled_image_marker(context)
+    if not marker.is_file():
+        return
+    image = marker.read_text(encoding="utf-8").strip()
+    if image != context.image:
+        print(f"[cell] ignoring unexpected pulled-image marker: {image!r}", flush=True)
+        return
+    result = subprocess.run(
+        [_container_engine(), "rmi", image], capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        print(f"[cell] removed pulled image {image}", flush=True)
+    else:
+        print(f"[cell] could not remove image {image}: {result.stderr.strip()}", flush=True)
 
 
 def _container_status(engine: str, name: str) -> str:
@@ -252,7 +284,7 @@ def _ensure_container(context: CellContext, environment: dict[str, str]) -> str:
         _wait_until_running(engine, name)
         return name
 
-    _ensure_image(context.image)
+    _ensure_image(context)
     command = [engine, "run", "-d", "--name", name]
     mounted: set[str] = set()
     for host in (context.root, context.output_dir, context.work_dir):
@@ -309,15 +341,24 @@ def _remove_work_dir(context: CellContext) -> None:
     print(f"[cell] removed work directory {target}", flush=True)
 
 
-def _preflight_disk(context: CellContext) -> None:
+def _required_free_disk(case: dict[str, Any]) -> int:
+    """Each software may declare its own floor as execution.min_free_disk_gb."""
+    declared = case["execution"].get("min_free_disk_gb")
+    if declared is None:
+        return DEFAULT_MIN_FREE_DISK_BYTES
+    return int(float(declared) * 1024 ** 3)
+
+
+def _preflight_disk(context: CellContext, minimum_bytes: int) -> None:
     """Fail fast with an actionable message when the runner is nearly out of space."""
     usage = shutil.disk_usage(context.work_dir)
-    if usage.free >= MIN_FREE_DISK_BYTES:
+    if usage.free >= minimum_bytes:
         return
     raise RuntimeError(
         f"only {usage.free // (1024 * 1024)} MiB free on the filesystem backing "
-        f"{context.work_dir}, but at least {MIN_FREE_DISK_BYTES // (1024 ** 3)} GiB is required; "
-        "prune the runner (docker system prune -af, clear the work root) and retry"
+        f"{context.work_dir}, but {context.software} needs at least "
+        f"{minimum_bytes / 1024 ** 3:.1f} GiB; prune the runner "
+        "(docker system prune -af, clear the work root) and retry"
     )
 
 
@@ -553,7 +594,7 @@ def main() -> int:
     if args.stage == "prepare":
         # 每个 cell 的 job 从 prepare 开始,在这里做一次磁盘预检。
         try:
-            _preflight_disk(context)
+            _preflight_disk(context, _required_free_disk(context.case))
         except RuntimeError as exc:
             write_status(
                 context, status="failed", stage=args.stage, failed_stage=args.stage,
@@ -568,6 +609,7 @@ def main() -> int:
     if args.stage == "cleanup":
         if context.os_runtime == "container":
             _remove_container(context)
+            _remove_pulled_image(context)
         # 无论 cleanup 是否成功都回收工作目录,否则跑一轮 all 就会把 runner 撑满。
         _remove_work_dir(context)
 

@@ -24,6 +24,8 @@ execution:
       script: test.sh
       function: func_cleanup
   timeout_minutes: 240
+  # C++ 库源码编译,需先装齐 boost/glog/gflags 等依赖。
+  min_free_disk_gb: 10
 
 # 功能判定项,名称与 functional_result.json 中 checks[].name 一一对应。
 checks:

@@ -24,6 +24,8 @@ execution:
       script: test.sh
       function: func_cleanup
   timeout_minutes: 240
+  # 源码编译 c,c++(--disable-bootstrap):源码树 + 构建树 + 安装树合计约 5~10 GiB。
+  min_free_disk_gb: 12
 
 # 功能判定项,名称与 functional_result.json 中 checks[].name 一一对应。
 # gcc 自带测试套件(make check)依赖 dejagnu 且耗时过长,不可行;

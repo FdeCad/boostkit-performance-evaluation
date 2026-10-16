@@ -24,6 +24,8 @@ execution:
       script: test.sh
       function: func_cleanup
   timeout_minutes: 300
+  # 源码编译(--enable-optimizations --with-lto):源码树 + 构建树 + 安装树。
+  min_free_disk_gb: 10
 
 # 功能判定项,名称与 functional_result.json 中 checks[].name 一一对应。
 # 判定来源:优先复用上游测试套件(upstream_command),不足时用内部 smoke 补齐。

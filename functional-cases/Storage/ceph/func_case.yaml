@@ -33,6 +33,8 @@ execution:
       script: test.sh
       function: func_cleanup
   timeout_minutes: 120
+  # 源码编译 ceph 体量很大。
+  min_free_disk_gb: 12
 
 # 功能判定项,名称与 functional_result.json 中 checks[].name 一一对应。
 # 判定来源:上游离线自检工具 + 最小可用性(完整集群引导很重,详见 detail)。

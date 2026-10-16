@@ -24,6 +24,8 @@ execution:
       script: test.sh
       function: func_cleanup
   timeout_minutes: 120
+  # 层 3 会克隆 pytorch 源码(含子模块)并现场编译 wheel,峰值远超框架默认值。
+  min_free_disk_gb: 25
 
 # 功能判定项,名称与 functional_result.json 中 checks[].name 一一对应。
 # 判定来源:版本校验 + 两个基于官方 torch 算子的功能 smoke。
