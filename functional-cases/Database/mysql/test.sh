@@ -18,8 +18,10 @@ mysqld_version() {
 }
 
 # 通过私有 socket 配置本任务账号(root@'%'),供 TCP 烟测使用。
+# 必须显式 --protocol=socket:本用例 export 了 MYSQL_HOST,客户端会据此把连接判成 TCP,
+# 端口又回落到默认的 3306(它不认 MYSQL_PORT),于是连不上我们监听的动态端口。
 configure_instance_account() {
-    "${MYSQL_BIN}" --socket="${SOCKET_PATH}" -u root <<SQL
+    "${MYSQL_BIN}" --protocol=socket --socket="${SOCKET_PATH}" -u root <<SQL
 ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_PASSWORD}';
 CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '${MYSQL_PASSWORD}';
 ALTER USER 'root'@'%' IDENTIFIED BY '${MYSQL_PASSWORD}';
@@ -63,7 +65,7 @@ start_mysql_instance() {
     }
 
     for attempt in {1..60}; do
-        if "${MYSQLADMIN_BIN}" --socket="${SOCKET_PATH}" -u root ping >/dev/null 2>&1; then
+        if "${MYSQLADMIN_BIN}" --protocol=socket --socket="${SOCKET_PATH}" -u root ping >/dev/null 2>&1; then
             configure_instance_account || {
                 log "ERROR: failed to configure the smoke account"
                 return 40
@@ -81,7 +83,7 @@ shutdown_mysql_instance() {
     local attempt
     [[ -S "${SOCKET_PATH}" ]] || return 0
     MYSQL_PWD="${MYSQL_PASSWORD}" "${MYSQLADMIN_BIN}" \
-        --socket="${SOCKET_PATH}" -u root shutdown >/dev/null 2>&1 || true
+        --protocol=socket --socket="${SOCKET_PATH}" -u root shutdown >/dev/null 2>&1 || true
     for attempt in {1..40}; do
         [[ -S "${SOCKET_PATH}" ]] || return 0
         sleep 0.5
