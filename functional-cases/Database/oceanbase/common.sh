@@ -224,7 +224,14 @@ install_oceanbase_dependencies() {
     for want in python3 curl; do
         command -v "${want}" >/dev/null 2>&1 || packages+=("${want}")
     done
-    command -v mysql >/dev/null 2>&1 || packages+=("mysql")
+    # mysql 只是命令名,各发行版的包名不同:Debian/Ubuntu 侧是 default-mysql-client,
+    # rhel 家族才叫 mysql(直接 apt install mysql 会报 Unable to locate package)。
+    if ! command -v mysql >/dev/null 2>&1; then
+        case "${family}" in
+            debian) packages+=("default-mysql-client") ;;
+            *) packages+=("mysql") ;;
+        esac
+    fi
     command -v sysbench >/dev/null 2>&1 || packages+=("sysbench")
 
     case "${family}" in
