@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # scann 构建脚本:环境采集 + 准备被测软件(安装或校验)。
 #   FUNC_MODE=prebuilt - 镜像内已装好 ScaNN,只定位并校验版本,不安装
-#   FUNC_MODE=build    - 装依赖 + 分层优先获取(上游官方 wheel→三方仓库→源码编译)到任务私有 venv
-#                        (官方仅 x86_64 wheel,aarch64 会自动降级到源码编译层)
+#   FUNC_MODE=build    - 装依赖 + 分层优先获取(上游官方 wheel→三方仓库)到任务私有 venv
+#                        (官方 aarch64 wheel 只覆盖 cp39-cp313,故用 uv 拉固定 3.13 解释器来装)
 # 暴露给 Framework 的阶段:prepare、install。独立执行时依次运行这两个阶段。
 set -euo pipefail
 
@@ -39,15 +39,58 @@ EOF
 
 # ---------- 阶段:install ----------
 
-# build 模式:创建任务私有 venv,再分层优先获取 ScaNN(见 common.sh acquire_build_layers)。
-# 官方仅发布 x86_64 manylinux wheel;aarch64 无 wheel,层 1 会失败并自动降级到源码编译层。
-install_scann_build() {
-    [[ ! -e "${VENV_DIR}" ]] || {
+# 安装上游官方 uv(astral-sh)静态二进制到本任务私有目录,用于拉取固定版本的 CPython。
+install_uv() {
+    local target archive
+    [[ -x "${UV_BIN}" ]] && return 0
+    case "$(normalize_arch "${EXPECTED_ARCH}")" in
+        aarch64) target="aarch64-unknown-linux-gnu" ;;
+        x86_64) target="x86_64-unknown-linux-gnu" ;;
+        *)
+            log "ERROR: unsupported architecture for uv: ${EXPECTED_ARCH}"
+            return 30
+            ;;
+    esac
+    archive="${PERF_WORK_DIR}/uv.tar.gz"
+    log "downloading official uv ${UV_VERSION} (${target})"
+    curl -fsSL --retry 3 --connect-timeout 30 -o "${archive}" \
+        "${UV_RELEASE_BASE}/${UV_VERSION}/uv-${target}.tar.gz" || {
+        log "ERROR: failed to download uv ${UV_VERSION}"
+        return 30
+    }
+    rm -rf -- "${UV_DIR}"
+    mkdir -p "${UV_DIR}" || return 30
+    tar -xzf "${archive}" -C "${UV_DIR}" --strip-components=1 || {
+        log "ERROR: failed to extract uv"
+        return 30
+    }
+    rm -f "${archive}"
+    [[ -x "${UV_BIN}" ]] || {
+        log "ERROR: uv binary is unavailable after install: ${UV_BIN}"
+        return 30
+    }
+    return 0
+}
+
+# 用 uv 拉取固定版本 CPython 并据此创建任务私有 venv。
+# scann 官方 aarch64 wheel 只覆盖 cp39-cp313(具体 ABI 标签),所以解释器必须是 3.13;
+# ubuntu 26.04 自带 3.14 会选不到任何 wheel,而 venv 无法改变解释器版本,必须用独立构建。
+create_scann_venv() {
+    local actual_python
+    export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_DIR}"
+    export UV_PYTHON_PREFERENCE=only-managed
+    if [[ -e "${VENV_DIR}" ]]; then
         log "ERROR: virtual environment is not clean: ${VENV_DIR}"
         return 20
+    fi
+    log "installing CPython ${SCANN_PYTHON_VERSION} via uv into ${UV_PYTHON_DIR}"
+    "${UV_BIN}" python install "${SCANN_PYTHON_VERSION}" || {
+        log "ERROR: uv failed to install CPython ${SCANN_PYTHON_VERSION}"
+        return 40
     }
-    log "creating task-private virtual environment ${VENV_DIR}"
-    python3 -m venv "${VENV_DIR}" || {
+    log "creating task-private venv from CPython ${SCANN_PYTHON_VERSION}"
+    # --seed 让 venv 自带 pip/setuptools,后续各层沿用 pip 安装产物。
+    "${UV_BIN}" venv --python "${SCANN_PYTHON_VERSION}" --seed "${VENV_DIR}" || {
         log "ERROR: failed to create the virtual environment"
         return 40
     }
@@ -55,6 +98,19 @@ install_scann_build() {
         log "ERROR: the virtual environment has no usable pip"
         return 40
     }
+    actual_python="$("${VENV_DIR}/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+    [[ "${actual_python}" == "${SCANN_PYTHON_VERSION}" ]] || {
+        log "ERROR: venv python is ${actual_python}, expected ${SCANN_PYTHON_VERSION}"
+        return 40
+    }
+    log "venv ready with CPython ${actual_python}"
+}
+
+# build 模式:先用 uv 拉固定版本 CPython 建任务私有 venv,再分层优先获取 ScaNN
+# (见 common.sh acquire_build_layers)。
+install_scann_build() {
+    install_uv || return $?
+    create_scann_venv || return $?
     acquire_build_layers \
         fetch_scann_upstream_binary \
         fetch_scann_third_party \
@@ -62,8 +118,9 @@ install_scann_build() {
 }
 
 # 层 1:上游官方二进制。
-# ScaNN 官方在 PyPI 发布预编译 wheel(config/distribution.yaml primary: pypi),但仅 x86_64 manylinux,
-# 无 arm64 产物。强制 --only-binary=:all: 确保拿到二进制;aarch64 上无 wheel,本层失败转下一层。
+# ScaNN 官方在 PyPI 发布预编译 wheel(config/distribution.yaml primary: pypi),aarch64 也有,
+# 但只覆盖 cp39-cp313。venv 用的是固定 3.13 解释器,故这里能命中官方 aarch64 wheel;
+# 强制 --only-binary=:all: 确保拿到二进制而非现场编译。
 fetch_scann_upstream_binary() {
     local -a index_args=()
     mapfile -t index_args < <(pip_index_args)
@@ -81,14 +138,11 @@ fetch_scann_third_party() {
 }
 
 # 层 3:源码编译(最后手段)。
-# 上游仅发布 x86_64 wheel,无 arm64 产物;此处安装官方源码 tarball(sdist)由 pip 现场编译。
+#   scann 上游从未发布 sdist(PyPI 上只有 bdist_wheel),且其源码构建依赖 Bazel 与 TensorFlow,
+#   不适合在功能测试的 build 模式内现场编译;故本层结构性不可用,显式跳过。
 fetch_scann_source() {
-    require_scann_source_tools || return $?
-    local -a index_args=()
-    mapfile -t index_args < <(pip_index_args)
-    log "no prebuilt scann wheel usable for ${EXPECTED_ARCH}; building from the upstream source tarball"
-    "${VENV_DIR}/bin/pip" install --no-cache-dir --disable-pip-version-check \
-        "${index_args[@]}" "${SCANN_PACKAGE_SPEC}"
+    log "layer 3: scann publishes no sdist and needs Bazel/TensorFlow to build; skip"
+    return 1
 }
 
 func_install() {

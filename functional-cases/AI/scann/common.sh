@@ -5,7 +5,7 @@ set -euo pipefail
 
 SOFTWARE_NAME="scann"
 CATEGORY="AI"
-SOFTWARE_VERSION="${SOFTWARE_VERSION:-1.4.0}"
+SOFTWARE_VERSION="${SOFTWARE_VERSION:-1.4.2}"
 EXPECTED_ARCH="${EXPECTED_ARCH:-$(uname -m)}"
 FUNC_OS="${FUNC_OS:-}"
 FUNC_HARDWARE="${FUNC_HARDWARE:-}"
@@ -15,13 +15,20 @@ PERF_WORK_DIR="${PERF_WORK_DIR:-}"
 RESULTS_DIR="${RESULTS_DIR:-}"
 PERF_ACTUAL_VERSION_FILE="${PERF_ACTUAL_VERSION_FILE:-}"
 
-# build 模式的取版渠道(分层优先,见 build.sh 的 fetch_scann_* 三层):
+# build 模式的取版渠道(分层优先,见 build.sh 的 fetch_scann_* 两层):
 #   层 1 上游官方二进制 = PyPI 官方 wheel scann(config/distribution.yaml primary: pypi);
+#          aarch64 wheel 存在,但只覆盖 cp39-cp313(具体 ABI 标签,不是 abi3),
+#          所以必须用 3.13 解释器安装,否则 pip 会判定"无可用 wheel",见 SCANN_PYTHON_VERSION;
 #   层 2 三方仓库 = conda/apt/docker 均无(channels: conda: null, apt: null, docker: null);
-#   层 3 源码编译 = 上游源码 tarball(官方发布的 sdist,由 pip 现场编译)。
-# 注意:官方仅发布 x86_64 manylinux wheel(arm64_binary: no),aarch64 上游/三方均无该精确版本产物,
-#   故 aarch64 上"源码编译"是唯一可行层(依官方构建脚本,失败即判安装失败)。
+#   层 3 源码编译 = 结构性不可用(scann 全部 release 均无 sdist,且源码构建依赖 Bazel/TensorFlow)。
 SCANN_PACKAGE_SPEC="scann==${SOFTWARE_VERSION}"
+# 装 scann 用的 CPython 版本,必须落在官方 wheel 的 cp39-cp313 区间内。
+# ubuntu 26.04 自带 python 3.14,选不到任何 scann wheel;venv 不能改变解释器版本,
+# 所以用 uv 拉一个真正独立的 3.13 构建装到本任务私有目录。
+SCANN_PYTHON_VERSION="${SCANN_PYTHON_VERSION:-3.13}"
+# 上游官方 uv(astral-sh)发布地址,用于获取固定版本的 CPython。
+UV_VERSION="${UV_VERSION:-0.13.1}"
+UV_RELEASE_BASE="${UV_RELEASE_BASE:-https://github.com/astral-sh/uv/releases/download}"
 # 国产 Runner 无法稳定访问 files.pythonhosted.org,非 ubuntu 时改用华为云 PyPI 镜像。
 PIP_MIRROR_INDEX="https://mirrors.huaweicloud.com/repository/pypi/simple"
 
@@ -29,6 +36,9 @@ PIP_MIRROR_INDEX="https://mirrors.huaweicloud.com/repository/pypi/simple"
 VENV_DIR=""
 PYBIN=""
 BUILD_DIR=""
+UV_DIR=""
+UV_BIN=""
+UV_PYTHON_DIR=""
 STANDALONE_OWNS_WORK_DIR=0
 STANDALONE_KEEP_WORK_DIR=0
 
@@ -101,6 +111,9 @@ configure_runtime_paths() {
     # build 模式:装到本次任务私有的虚拟环境,避免污染系统 Python。
     VENV_DIR="${PERF_WORK_DIR}/${SOFTWARE_NAME}-venv"
     BUILD_DIR="${PERF_WORK_DIR}/build"
+    UV_DIR="${PERF_WORK_DIR}/uv"
+    UV_BIN="${UV_DIR}/uv"
+    UV_PYTHON_DIR="${PERF_WORK_DIR}/uv-python"
     if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
         PYBIN="$(command -v python3 2>/dev/null || true)"
     else
@@ -110,6 +123,7 @@ configure_runtime_paths() {
     export SOFTWARE_NAME CATEGORY SOFTWARE_VERSION EXPECTED_ARCH FUNC_OS FUNC_HARDWARE FUNC_MODE
     export PERF_RUN_ID PERF_WORK_DIR RESULTS_DIR PERF_ACTUAL_VERSION_FILE TMPDIR
     export VENV_DIR PYBIN BUILD_DIR
+    export SCANN_PYTHON_VERSION UV_VERSION UV_RELEASE_BASE UV_DIR UV_BIN UV_PYTHON_DIR
 }
 
 initialize_runtime() {
@@ -162,19 +176,6 @@ acquire_build_layers() {
     return 40
 }
 
-# 层 3(源码编译)所需工具:git + g++/make。
-require_scann_source_tools() {
-    local -a logical=()
-    command -v git >/dev/null 2>&1 || logical+=(git)
-    if ! command -v cc >/dev/null 2>&1 || ! command -v c++ >/dev/null 2>&1 || \
-        ! command -v make >/dev/null 2>&1; then
-        logical+=(build-tools)
-    fi
-    (( ${#logical[@]} == 0 )) && return 0
-    log "installing source-build dependencies: ${logical[*]}"
-    install_os_packages "${logical[@]}" || return 30
-}
-
 # ---------- OS 感知的依赖安装(build 模式用) ----------
 
 dnf_install() {
@@ -212,6 +213,7 @@ install_os_packages() {
             venv) rhel+=(python3); debian+=(python3-venv) ;;
             build-tools) rhel+=(gcc gcc-c++ make); debian+=(gcc g++ make) ;;
             curl) rhel+=(curl); debian+=(curl) ;;
+            tar) rhel+=(tar); debian+=(tar) ;;
             *)
                 log "ERROR: unknown logical package: ${logical}"
                 return 30
@@ -236,21 +238,13 @@ install_os_packages() {
     esac
 }
 
-# build 模式创建虚拟环境所需的命令:python3、pip、venv 模块。
-# aarch64 无官方 wheel 时需源码构建,因此额外要求编译器与 make。
+# build 模式创建虚拟环境所需的命令。
+# 解释器由 uv 单独拉取(见 build.sh 的 create_scann_venv),这里只需要系统能跑 python3 兜底。
 require_python_runtime() {
     local -a logical=()
     command -v python3 >/dev/null 2>&1 || logical+=(python3)
-    if ! command -v python3 >/dev/null 2>&1 || ! python3 -m pip --version >/dev/null 2>&1; then
-        logical+=(pip)
-    fi
-    if ! command -v python3 >/dev/null 2>&1 || ! python3 -m venv --help >/dev/null 2>&1; then
-        logical+=(venv)
-    fi
-    if [[ "$(normalize_arch "${EXPECTED_ARCH}")" != "x86_64" ]] && \
-        { ! command -v cc >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; }; then
-        logical+=(build-tools)
-    fi
+    command -v curl >/dev/null 2>&1 || logical+=(curl)
+    command -v tar >/dev/null 2>&1 || logical+=(tar)
     (( ${#logical[@]} == 0 )) && return 0
     log "installing missing dependencies: ${logical[*]}"
     install_os_packages "${logical[@]}" || return 30
