@@ -64,6 +64,16 @@ mysql_archive_descriptor() {
             MYSQL_ARCHIVE_NAME="mysql-8.0.43-linux-glibc2.28-aarch64.tar.xz"
             MYSQL_ARCHIVE_MD5="c51923a9b540cd2f886734d3e0366e9a"
             ;;
+        26.7.0:x86_64)
+            MYSQL_RELEASE_DIR="MySQL-26.7"
+            MYSQL_ARCHIVE_NAME="mysql-26.7.0-linux-glibc2.28-x86_64.tar.xz"
+            MYSQL_ARCHIVE_MD5="f1b4f2a046493898d7a9d2d1c2bb43c8"
+            ;;
+        26.7.0:aarch64)
+            MYSQL_RELEASE_DIR="MySQL-26.7"
+            MYSQL_ARCHIVE_NAME="mysql-26.7.0-linux-glibc2.28-aarch64.tar.xz"
+            MYSQL_ARCHIVE_MD5="7226ab9a5098190c130a2e97f4891561"
+            ;;
         *)
             # 不作为硬错误:该层不可用即降级到下一层。
             log "no verified official MySQL release declared for ${SOFTWARE_VERSION} on ${EXPECTED_ARCH}"
