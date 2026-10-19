@@ -101,7 +101,7 @@ configure_runtime_paths() {
     VENV_DIR="${PERF_WORK_DIR}/${SOFTWARE_NAME}-venv"
     BUILD_DIR="${PERF_WORK_DIR}/build"
     if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
-        PYBIN="$(command -v python3 2>/dev/null || true)"
+        PYBIN="$(resolve_prebuilt_python || true)"
     else
         PYBIN="${VENV_DIR}/bin/python"
     fi
@@ -114,6 +114,33 @@ configure_runtime_paths() {
 initialize_runtime() {
     configure_runtime_paths || return $?
     mkdir -p "${RESULTS_DIR}" "${PERF_WORK_DIR}" "${TMPDIR}" "${BUILD_DIR}"
+}
+
+# prebuilt 模式下定位预构建镜像里 hnswlib 所在的解释器。
+# 预构建镜像可能把包装在独立的 python 环境(如 conda)而不是系统 python3,
+# 此时用系统 python3 探测不到已安装版本。这里遍历常见解释器位置,取第一个能读到
+# hnswlib 版本的;全都读不到则退回系统 python3,交给版本校验报告差异。
+resolve_prebuilt_python() {
+    local py version
+    local -a candidates=(
+        "$(command -v python3 2>/dev/null || true)"
+        "/usr/bin/python3"
+        "/usr/local/bin/python3"
+        "/opt/conda/bin/python3"
+        "/opt/conda/bin/python"
+        "/opt/miniconda3/bin/python3"
+        "/opt/miniconda3/bin/python"
+        "/usr/local/python3/bin/python3"
+    )
+    for py in "${candidates[@]}"; do
+        [[ -n "${py}" && -x "${py}" ]] || continue
+        version="$("${py}" -c 'import importlib.metadata as m; print(m.version("hnswlib"))' 2>/dev/null || true)"
+        if [[ -n "${version}" ]]; then
+            printf '%s\n' "${py}"
+            return 0
+        fi
+    done
+    command -v python3 2>/dev/null || true
 }
 
 # 通过 import 与包元数据读取已安装 hnswlib 的版本号。
@@ -223,9 +250,11 @@ install_os_packages() {
 }
 
 # build 模式创建虚拟环境所需的命令:python3、pip、venv 模块。
-# hnswlib 在 aarch64 上需要从源码包编译,因此还要编译器与 make。
+# hnswlib 在 aarch64 上需要从源码包编译,因此还要编译器与 make;
+# 层3 要 git clone 上游源码,故 git 也是必需命令(PyPI 上并非每个待测版本都有发布)。
 require_python_runtime() {
     local -a logical=()
+    command -v git >/dev/null 2>&1 || logical+=(git)
     command -v python3 >/dev/null 2>&1 || logical+=(python3)
     if ! command -v python3 >/dev/null 2>&1 || ! python3 -m pip --version >/dev/null 2>&1; then
         logical+=(pip)
