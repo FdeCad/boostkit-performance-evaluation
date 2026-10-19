@@ -2,7 +2,7 @@
 # scann 构建脚本:环境采集 + 准备被测软件(安装或校验)。
 #   FUNC_MODE=prebuilt - 镜像内已装好 ScaNN,只定位并校验版本,不安装
 #   FUNC_MODE=build    - 装依赖 + 分层优先获取(上游官方 wheel→三方仓库)到任务私有 venv
-#                        (官方 aarch64 wheel 只覆盖 cp39-cp313,故用 uv 拉固定 3.13 解释器来装)
+#                        (官方 aarch64 wheel 只有 cp39 是真实构建,故用 uv 拉固定 3.9 解释器来装)
 # 暴露给 Framework 的阶段:prepare、install。独立执行时依次运行这两个阶段。
 set -euo pipefail
 
@@ -73,7 +73,8 @@ install_uv() {
 }
 
 # 用 uv 拉取固定版本 CPython 并据此创建任务私有 venv。
-# scann 官方 aarch64 wheel 只覆盖 cp39-cp313(具体 ABI 标签),所以解释器必须是 3.13;
+# scann 1.4.2 的 aarch64 包只有 cp39 是真实构建(cp310-cp313 均为同一产物副本,见上游 issue #2968),
+# 解释器必须与 wheel 的真实编译版本一致,故锁定 3.9;
 # ubuntu 26.04 自带 3.14 会选不到任何 wheel,而 venv 无法改变解释器版本,必须用独立构建。
 create_scann_venv() {
     local actual_python
@@ -119,7 +120,8 @@ install_scann_build() {
 
 # 层 1:上游官方二进制。
 # ScaNN 官方在 PyPI 发布预编译 wheel(config/distribution.yaml primary: pypi),aarch64 也有,
-# 但只覆盖 cp39-cp313。venv 用的是固定 3.13 解释器,故这里能命中官方 aarch64 wheel;
+# 但只覆盖 cp39-cp313。venv 用的是固定 3.9 解释器,故这里命中官方 cp39 aarch64 wheel
+# (aarch64 的 cp310-cp313 包是 cp39 的副本,不可用,详见上游 issue #2968);
 # 强制 --only-binary=:all: 确保拿到二进制而非现场编译。
 fetch_scann_upstream_binary() {
     local -a index_args=()

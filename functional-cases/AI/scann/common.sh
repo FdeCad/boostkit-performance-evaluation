@@ -18,14 +18,17 @@ PERF_ACTUAL_VERSION_FILE="${PERF_ACTUAL_VERSION_FILE:-}"
 # build 模式的取版渠道(分层优先,见 build.sh 的 fetch_scann_* 两层):
 #   层 1 上游官方二进制 = PyPI 官方 wheel scann(config/distribution.yaml primary: pypi);
 #          aarch64 wheel 存在,但只覆盖 cp39-cp313(具体 ABI 标签,不是 abi3),
-#          所以必须用 3.13 解释器安装,否则 pip 会判定"无可用 wheel",见 SCANN_PYTHON_VERSION;
+#          且 1.4.2 发布事故导致 aarch64 的 cp310-cp313 四个包都是同一份 cp39 产物
+#          (在 3.10+ 上 import 报 "compiled for Python 3.9",3.13 上更早死于符号缺失),
+#          只有 cp39 包是真实构建,故解释器必须锁定 3.9,见 SCANN_PYTHON_VERSION;
 #   层 2 三方仓库 = conda/apt/docker 均无(channels: conda: null, apt: null, docker: null);
 #   层 3 源码编译 = 结构性不可用(scann 全部 release 均无 sdist,且源码构建依赖 Bazel/TensorFlow)。
 SCANN_PACKAGE_SPEC="scann==${SOFTWARE_VERSION}"
-# 装 scann 用的 CPython 版本,必须落在官方 wheel 的 cp39-cp313 区间内。
-# ubuntu 26.04 自带 python 3.14,选不到任何 scann wheel;venv 不能改变解释器版本,
-# 所以用 uv 拉一个真正独立的 3.13 构建装到本任务私有目录。
-SCANN_PYTHON_VERSION="${SCANN_PYTHON_VERSION:-3.13}"
+# 装 scann 用的 CPython 版本,必须与官方 wheel 的真实编译版本一致。
+# aarch64 上 1.4.2 只有 cp39 包是真实构建,故锁定 3.9;ubuntu 26.04 自带 python 3.14,
+# 选不到任何 scann wheel,venv 也不能改变解释器版本,
+# 所以用 uv 拉一个真正独立的 3.9 构建装到本任务私有目录。
+SCANN_PYTHON_VERSION="${SCANN_PYTHON_VERSION:-3.9}"
 # 上游官方 uv(astral-sh)发布地址,用于获取固定版本的 CPython。
 UV_VERSION="${UV_VERSION:-0.13.1}"
 UV_RELEASE_BASE="${UV_RELEASE_BASE:-https://github.com/astral-sh/uv/releases/download}"

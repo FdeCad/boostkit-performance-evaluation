@@ -5,7 +5,7 @@ category: AI
 enabled: true
 
 # 人工指定的待测版本(白名单),由人工维护。
-# 只保留 1.4.2:aarch64 官方 wheel 覆盖 cp39-cp313,配合固定 3.13 解释器即可命中;
+# 只保留 1.4.2:aarch64 官方 wheel 只有 cp39 是真实构建,配合固定 3.9 解释器即可命中;
 # 1.2.10 在 PyPI 只有 x86_64 wheel,既无 aarch64 也无 sdist,在 kunpeng 上无可用产物,故移除。
 versions:
   - "1.4.2"
@@ -26,13 +26,14 @@ execution:
       script: test.sh
       function: func_cleanup
   timeout_minutes: 60
-  # 需要下载 uv + 固定 3.13 解释器 + 官方 aarch64 wheel。
+  # 需要下载 uv + 固定 3.9 解释器 + 官方 aarch64 wheel。
   min_free_disk_gb: 6
 
 # 功能判定项,名称与 functional_result.json 中 checks[].name 一一对应。
 # 判定来源:版本校验 + 两个基于官方 scann_ops_pybind 索引构建 API 的功能 smoke。
 # build 模式分层优先获取(上游官方 wheel→三方仓库),每层校验版本严格相等;
-# aarch64 上官方 wheel 存在但只覆盖 cp39-cp313,故用 uv 拉固定 3.13 解释器来安装
+# aarch64 上官方 wheel 存在且只有 cp39 是真实构建(cp310-cp313 为同一产物副本,见上游 issue #2968),
+# 故用 uv 拉固定 3.9 解释器来安装
 # (ubuntu 26.04 自带的 3.14 会被 pip 判定为无可用 wheel);源码编译层已结构性不可用。
 checks:
   - name: version
