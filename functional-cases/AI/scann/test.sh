@@ -34,7 +34,7 @@ print("scann dot_product build/search ok")
 PY
 }
 
-# 更完整的功能:squared_l2 建索引并检索,校验返回形状与距离升序。
+# 更完整的功能:squared_l2 建索引并检索,校验返回形状一致、邻居合法与距离升序。
 write_squared_l2_smoke() {
     cat >"$1" <<'PY'
 import numpy as np
@@ -51,9 +51,11 @@ searcher = (
     .build()
 )
 neighbors, distances = searcher.search(vectors[0], 3, 3, 1)
-assert neighbors.shape == (3,), neighbors.shape
-assert distances.shape == (3,), distances.shape
-assert (neighbors >= 0).all(), "invalid neighbour id"
+# ScaNN 只保证"至多返回 k 个":候选不足时(如查询落在小叶子)结果会少于 k,
+# 故只校验形状一致、邻居数量区间、id 合法与距离升序。
+assert neighbors.shape == distances.shape, (neighbors.shape, distances.shape)
+assert 0 < neighbors.shape[0] <= 3, neighbors.shape
+assert (neighbors >= 0).all() and (neighbors < vectors.shape[0]).all(), "invalid neighbour id"
 assert (np.diff(distances) >= -1e-5).all(), f"distances not ascending: {distances}"
 print("scann squared_l2 build/search ok")
 PY
@@ -130,7 +132,7 @@ func_check() {
     if write_squared_l2_smoke "${TMPDIR}/scann_l2.py" && \
         "${PYBIN}" "${TMPDIR}/scann_l2.py" >>"${log_file}" 2>&1; then
         l2_status="passed"
-        l2_detail="squared_l2 searcher build/search returned sorted distances"
+        l2_detail="squared_l2 searcher build/search returned consistent shapes and sorted distances"
     else
         l2_detail="squared_l2 smoke failed; see functional_test.log"
     fi

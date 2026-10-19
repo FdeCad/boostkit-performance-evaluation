@@ -41,7 +41,7 @@ checks:
   - name: scann-dot-product
     description: dot_product 距离建索引并检索,校验返回形状与邻居合法性
   - name: scann-squared-l2
-    description: squared_l2 距离建索引并检索,校验返回形状与距离升序
+    description: squared_l2 距离建索引并检索,校验返回形状一致、邻居合法与距离升序
 
 outputs:
   functional_result:
