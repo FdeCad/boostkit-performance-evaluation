@@ -96,7 +96,7 @@ acquire_oceanbase_build() {
         log "build: trying acquisition layer '${layer}' for OceanBase ${SOFTWARE_VERSION}"
         if "oceanbase_layer_${layer//-/_}"; then
             actual="$(query_observer_version)"
-            if [[ "${actual}" == "${SOFTWARE_VERSION}" ]]; then
+            if version_matches "${actual}" "${SOFTWARE_VERSION}"; then
                 log "build: OceanBase ${SOFTWARE_VERSION} obtained from layer '${layer}'"
                 return 0
             fi
@@ -129,7 +129,7 @@ func_install() {
     fi
 
     actual="$(query_observer_version)"
-    [[ "${actual}" == "${SOFTWARE_VERSION}" ]] || {
+    version_matches "${actual}" "${SOFTWARE_VERSION}" || {
         log "ERROR: observer reports ${actual:-unknown}, expected ${SOFTWARE_VERSION}"
         return 40
     }

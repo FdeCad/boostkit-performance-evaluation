@@ -153,6 +153,14 @@ query_observer_version() {
     printf '%s' "${value}" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true
 }
 
+# 版本比对:预构建镜像的 tag 用三段式(5.0.1),而 observer 自报四段式(5.0.1.0),
+# 两者同属一条版本线,故按"段前缀"判定(请求版本是实际版本的前缀即视为一致)。
+version_matches() {
+    local actual="$1" expected="$2"
+    [[ -n "${actual}" ]] || return 1
+    [[ "${actual}" == "${expected}" || "${actual}" == "${expected}".* ]]
+}
+
 # 轮询等待 observer 就绪。
 wait_observer_ready() {
     local attempts="${1:-120}" attempt

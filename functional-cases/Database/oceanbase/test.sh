@@ -98,7 +98,7 @@ func_check() {
     else
         # 1) 版本
         actual="$(query_observer_version)"
-        if [[ "${actual}" == "${SOFTWARE_VERSION}" ]]; then
+        if version_matches "${actual}" "${SOFTWARE_VERSION}"; then
             version_status="passed"
             version_detail="observer ${actual}"
         else
