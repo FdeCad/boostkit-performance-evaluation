@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # hnswlib 测试脚本:功能判定 + 收尾。
-# 判定:版本校验 + add/knn_query 回环 smoke + 带 filter 的过滤检索 smoke。
+# 判定:头文件聚合指纹的版本校验 + g++ 编译运行 add/search 回环 + saveIndex/reload 回环。
 # 暴露给 Framework 的阶段:check、cleanup。独立执行时依次运行这两个阶段。
 set -euo pipefail
 
@@ -10,75 +10,146 @@ source "${SCRIPT_DIR}/common.sh"
 
 # ---------- 阶段:check ----------
 
-# 基础 smoke:建索引、add_items、knn_query 回环,校验形状与自查询召回。
-write_knn_smoke() {
-    cat >"$1" <<'PY'
-import hnswlib
-import numpy as np
+# 编译探针:用 g++ 编译并运行上游 HNSW 核心 API(addPoint/searchKnn/saveIndex)。
+# 头文件以 <hnswlib/hnswlib.h> 引用,所以 -I 指向头文件目录的父目录。
+write_knn_roundtrip() {
+    cat >"$1" <<'CPP'
+#include <hnswlib/hnswlib.h>
 
-dim, num_elements, k = 16, 200, 3
-rng = np.random.default_rng(0)
-data = np.asarray(rng.random((num_elements, dim)), dtype="float32")
-ids = np.arange(num_elements)
+#include <cstdio>
+#include <queue>
+#include <utility>
+#include <vector>
 
-index = hnswlib.Index(space="l2", dim=dim)
-index.init_index(max_elements=num_elements, ef_construction=200, M=16)
-index.add_items(data, ids)
-assert index.get_current_count() == num_elements
+int main() {
+    const size_t dim = 16;
+    const size_t num_elements = 200;
+    const size_t M = 16;
+    const size_t ef_construction = 200;
 
-index.set_ef(200)
-labels, distances = index.knn_query(data[:5], k=k)
-assert labels.shape == (5, k), labels.shape
-assert distances.shape == (5, k), distances.shape
-assert (distances >= 0).all()
+    hnswlib::L2Space space(dim);
+    hnswlib::HierarchicalNSW<float> *index =
+        new hnswlib::HierarchicalNSW<float>(&space, num_elements, M, ef_construction);
+    index->setEf(num_elements);
 
-# 自查最近邻:高 ef 下自身命中率应接近 1。
-self_labels, _ = index.knn_query(data, k=1)
-recall = float((self_labels[:, 0] == ids).mean())
-assert recall >= 0.9, f"self-query recall too low: {recall}"
-print(f"hnswlib add/knn_query ok (self-query recall={recall:.3f})")
-PY
+    std::vector<float> data(dim * num_elements, 0.0f);
+    for (size_t i = 0; i < num_elements; ++i) {
+        data[i * dim] = static_cast<float>(i);
+        index->addPoint(data.data() + i * dim, static_cast<hnswlib::labeltype>(i));
+    }
+
+    // 自查询:每个点检索最近的 1 个,应当命中自身(高 ef 下应全中)。
+    size_t hits = 0;
+    for (size_t i = 0; i < num_elements; ++i) {
+        std::priority_queue<std::pair<float, hnswlib::labeltype> > result =
+            index->searchKnn(data.data() + i * dim, 1);
+        if (!result.empty() && static_cast<size_t>(result.top().second) == i) {
+            ++hits;
+        }
+    }
+    const double recall =
+        static_cast<double>(hits) / static_cast<double>(num_elements);
+    std::printf("self_recall=%.3f\n", recall);
+    if (hits != num_elements) {
+        std::fprintf(stderr, "FAIL: self query missed %zu of %zu\n",
+                     num_elements - hits, num_elements);
+        delete index;
+        return 1;
+    }
+
+    // 插值查询:第 0 维取 150.25,最近邻应为标签 150。
+    std::vector<float> query(dim, 0.0f);
+    query[0] = 150.25f;
+    std::priority_queue<std::pair<float, hnswlib::labeltype> > nearest =
+        index->searchKnn(query.data(), 1);
+    if (nearest.empty() || static_cast<size_t>(nearest.top().second) != 150) {
+        std::fprintf(stderr, "FAIL: interpolated query did not return label 150\n");
+        delete index;
+        return 1;
+    }
+    std::printf("interp_label=%zu\n", static_cast<size_t>(nearest.top().second));
+
+    delete index;
+    std::printf("HNSWLIB_KNN_OK\n");
+    return 0;
+}
+CPP
 }
 
-# 过滤检索:仅允许偶数 id,校验返回值全部满足过滤条件。
-write_filter_smoke() {
-    cat >"$1" <<'PY'
-import hnswlib
-import numpy as np
+# 落盘回环:saveIndex 后重新加载索引,校验加载后的检索结果一致。
+write_save_reload() {
+    cat >"$1" <<'CPP'
+#include <hnswlib/hnswlib.h>
 
-dim, num_elements, k = 16, 200, 3
-rng = np.random.default_rng(1)
-data = np.asarray(rng.random((num_elements, dim)), dtype="float32")
-ids = np.arange(num_elements)
+#include <cstdio>
+#include <queue>
+#include <string>
+#include <utility>
+#include <vector>
 
-index = hnswlib.Index(space="l2", dim=dim)
-index.init_index(max_elements=num_elements, ef_construction=200, M=16)
-index.add_items(data, ids)
-index.set_ef(200)
+int main(int argc, char **argv) {
+    if (argc != 2) {
+        std::fprintf(stderr, "usage: %s <index-path>\n", argv[0]);
+        return 2;
+    }
+    const std::string index_path = argv[1];
+    const size_t dim = 16;
+    const size_t num_elements = 200;
+    const size_t M = 16;
+    const size_t ef_construction = 200;
 
+    hnswlib::L2Space space(dim);
+    std::vector<float> data(dim * num_elements, 0.0f);
+    for (size_t i = 0; i < num_elements; ++i) {
+        data[i * dim] = static_cast<float>(i);
+    }
 
-def even_only(label):
-    return label % 2 == 0
+    {
+        hnswlib::HierarchicalNSW<float> *index =
+            new hnswlib::HierarchicalNSW<float>(&space, num_elements, M, ef_construction);
+        index->setEf(num_elements);
+        for (size_t i = 0; i < num_elements; ++i) {
+            index->addPoint(data.data() + i * dim, static_cast<hnswlib::labeltype>(i));
+        }
+        index->saveIndex(index_path);
+        delete index;
+    }
 
+    hnswlib::HierarchicalNSW<float> *reloaded =
+        new hnswlib::HierarchicalNSW<float>(&space, index_path);
+    reloaded->setEf(num_elements);
 
-labels, distances = index.knn_query(data[:5], k=k, filter=even_only)
-assert labels.shape == (5, k), labels.shape
-assert (labels % 2 == 0).all(), "filtered results contain odd ids"
-print("hnswlib filtered knn_query ok")
-PY
+    std::vector<float> query(dim, 0.0f);
+    query[0] = 42.4f;
+    std::priority_queue<std::pair<float, hnswlib::labeltype> > result =
+        reloaded->searchKnn(query.data(), 1);
+    if (result.empty() || static_cast<size_t>(result.top().second) != 42) {
+        std::fprintf(stderr, "FAIL: reloaded index did not return label 42\n");
+        delete reloaded;
+        return 1;
+    }
+    std::printf("reload_label=%zu\n", static_cast<size_t>(result.top().second));
+    delete reloaded;
+
+    std::printf("HNSWLIB_RELOAD_OK\n");
+    return 0;
+}
+CPP
 }
 
 write_functional_result() {
-    local overall="$1" v_status="$2" v_detail="$3" k_status="$4" k_detail="$5" f_status="$6" f_detail="$7"
-    FUNC_OVERALL="${overall}" \
-        FUNC_V_STATUS="${v_status}" FUNC_V_DETAIL="${v_detail}" \
-        FUNC_K_STATUS="${k_status}" FUNC_K_DETAIL="${k_detail}" \
-        FUNC_F_STATUS="${f_status}" FUNC_F_DETAIL="${f_detail}" \
-        python3 - "${RESULTS_DIR}/functional_result.json" <<'PY'
+    local overall="$1"
+    shift
+    FUNC_OVERALL="${overall}" python3 - "${RESULTS_DIR}/functional_result.json" "$@" <<'PY'
 import json, os, sys
 
 out = sys.argv[1]
+items = sys.argv[2:]
 env = os.environ.get
+checks = [
+    {"name": items[i], "status": items[i + 1], "detail": items[i + 2]}
+    for i in range(0, len(items), 3)
+]
 payload = {
     "software": env("SOFTWARE_NAME"),
     "category": env("CATEGORY"),
@@ -89,11 +160,7 @@ payload = {
     "architecture": env("EXPECTED_ARCH"),
     "run_id": env("PERF_RUN_ID"),
     "status": env("FUNC_OVERALL"),
-    "checks": [
-        {"name": "version", "status": env("FUNC_V_STATUS"), "detail": env("FUNC_V_DETAIL")},
-        {"name": "hnsw-knn-roundtrip", "status": env("FUNC_K_STATUS"), "detail": env("FUNC_K_DETAIL")},
-        {"name": "hnsw-filter", "status": env("FUNC_F_STATUS"), "detail": env("FUNC_F_DETAIL")},
-    ],
+    "checks": checks,
 }
 tmp = out + ".tmp"
 with open(tmp, "w", encoding="utf-8") as handle:
@@ -104,56 +171,64 @@ PY
 
 func_check() {
     initialize_runtime || return $?
-    [[ -n "${PYBIN}" && -x "${PYBIN}" ]] || {
-        log "ERROR: python interpreter is unavailable"
+    # 编译探针需要 g++(build 模式已在 install 阶段装好;prebuilt 镜像自带 gcc-c++)。
+    require_build_commands || return $?
+    [[ -n "${HNSWLIB_INCLUDE_DIR}" && -d "${HNSWLIB_INCLUDE_DIR}" ]] || {
+        log "ERROR: hnswlib headers are unavailable: ${HNSWLIB_INCLUDE_DIR:-unset}"
         return 40
     }
     local log_file="${RESULTS_DIR}/functional_test.log"
+    local include_root
+    include_root="$(dirname "${HNSWLIB_INCLUDE_DIR}")"
     : >"${log_file}"
 
     local version_status="failed" version_detail="" actual
     local knn_status="failed" knn_detail=""
-    local filter_status="failed" filter_detail=""
+    local reload_status="failed" reload_detail=""
 
-    # 1) 版本
+    # 1) 版本:整套头文件的聚合指纹
     actual="$(read_installed_version)"
     if [[ "${actual}" == "${SOFTWARE_VERSION}" ]]; then
         version_status="passed"
-        version_detail="hnswlib ${actual}"
+        version_detail="hnswlib ${actual} (header fingerprint matched)"
     else
         version_detail="hnswlib ${actual:-unknown}, expected ${SOFTWARE_VERSION}"
     fi
     printf 'version: %s (%s)\n' "${version_status}" "${version_detail}" >>"${log_file}"
 
-    # 2) 基础 smoke:add/knn_query 回环
-    if write_knn_smoke "${TMPDIR}/hnswlib_knn.py" && \
-        "${PYBIN}" "${TMPDIR}/hnswlib_knn.py" >>"${log_file}" 2>&1; then
+    # 2) g++ 编译并运行 add/search 回环
+    if write_knn_roundtrip "${TMPDIR}/hnswlib_knn.cpp" &&
+        "${CXX}" -std=c++11 -O2 -pthread -I"${include_root}" \
+            "${TMPDIR}/hnswlib_knn.cpp" -o "${TMPDIR}/hnswlib_knn" >>"${log_file}" 2>&1 &&
+        "${TMPDIR}/hnswlib_knn" >>"${log_file}" 2>&1; then
         knn_status="passed"
-        knn_detail="add_items/knn_query roundtrip returned correct shapes and self-query hits"
+        knn_detail="addPoint/searchKnn roundtrip returned exact self labels and the interpolated neighbour"
     else
-        knn_detail="knn roundtrip smoke failed; see functional_test.log"
+        knn_detail="knn roundtrip failed; see functional_test.log"
     fi
     printf 'hnsw-knn-roundtrip: %s (%s)\n' "${knn_status}" "${knn_detail}" >>"${log_file}"
 
-    # 3) 过滤检索
-    if write_filter_smoke "${TMPDIR}/hnswlib_filter.py" && \
-        "${PYBIN}" "${TMPDIR}/hnswlib_filter.py" >>"${log_file}" 2>&1; then
-        filter_status="passed"
-        filter_detail="filtered knn_query honoured the allow predicate"
+    # 3) saveIndex 落盘后重新加载
+    if write_save_reload "${TMPDIR}/hnswlib_reload.cpp" &&
+        "${CXX}" -std=c++11 -O2 -pthread -I"${include_root}" \
+            "${TMPDIR}/hnswlib_reload.cpp" -o "${TMPDIR}/hnswlib_reload" >>"${log_file}" 2>&1 &&
+        "${TMPDIR}/hnswlib_reload" "${TMPDIR}/hnswlib_index.bin" >>"${log_file}" 2>&1; then
+        reload_status="passed"
+        reload_detail="saveIndex + reload returned the same neighbour"
     else
-        filter_detail="filtered knn_query smoke failed; see functional_test.log"
+        reload_detail="save/reload roundtrip failed; see functional_test.log"
     fi
-    printf 'hnsw-filter: %s (%s)\n' "${filter_status}" "${filter_detail}" >>"${log_file}"
+    printf 'hnsw-save-reload: %s (%s)\n' "${reload_status}" "${reload_detail}" >>"${log_file}"
 
     local overall="passed"
-    if [[ "${version_status}" != "passed" || "${knn_status}" != "passed" || "${filter_status}" != "passed" ]]; then
+    if [[ "${version_status}" != "passed" || "${knn_status}" != "passed" || "${reload_status}" != "passed" ]]; then
         overall="failed"
     fi
     write_functional_result "${overall}" \
-        "${version_status}" "${version_detail}" \
-        "${knn_status}" "${knn_detail}" \
-        "${filter_status}" "${filter_detail}"
-    log "checks: version=${version_status} hnsw-knn-roundtrip=${knn_status} hnsw-filter=${filter_status}"
+        "version" "${version_status}" "${version_detail}" \
+        "hnsw-knn-roundtrip" "${knn_status}" "${knn_detail}" \
+        "hnsw-save-reload" "${reload_status}" "${reload_detail}"
+    log "checks: version=${version_status} hnsw-knn-roundtrip=${knn_status} hnsw-save-reload=${reload_status}"
 
     [[ "${overall}" == "passed" ]] || return 50
 }
@@ -162,14 +237,11 @@ func_check() {
 
 func_cleanup() {
     initialize_runtime || return $?
-    if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
-        log "prebuilt mode: nothing installed by this case to clean"
-    else
-        [[ -d "${VENV_DIR}" ]] && rm -rf -- "${VENV_DIR}"
-        [[ -d "${BUILD_DIR}" ]] && rm -rf -- "${BUILD_DIR}"
-        log "removed the task-private venv and build directory"
-    fi
-    [[ -d "${TMPDIR}" ]] && rm -rf -- "${TMPDIR}/hnswlib_knn.py" "${TMPDIR}/hnswlib_filter.py"
+    [[ -d "${BUILD_DIR}" ]] && rm -rf -- "${BUILD_DIR}"
+    [[ -d "${TMPDIR}" ]] && rm -rf -- \
+        "${TMPDIR}/hnswlib_knn.cpp" "${TMPDIR}/hnswlib_knn" \
+        "${TMPDIR}/hnswlib_reload.cpp" "${TMPDIR}/hnswlib_reload" \
+        "${TMPDIR}/hnswlib_index.bin"
     log "cleaned hnswlib task data"
 }
 
@@ -198,7 +270,7 @@ emergency_cleanup() {
 usage() {
     cat <<USAGE
 Usage: $(basename "$0") [OPTIONS]
-Run the hnswlib functional checks and clean up for one OS/hardware cell.
+Run the hnswlib (C++ headers) functional checks and clean up for one OS/hardware cell.
 
 Options:
   --version VERSION    hnswlib version (default: ${SOFTWARE_VERSION})

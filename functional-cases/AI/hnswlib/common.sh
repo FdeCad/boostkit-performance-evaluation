@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # hnswlib 功能测试共享库:由 build.sh / test.sh source。
-# 提供运行路径初始化、OS 探测与依赖安装、JSON 辅助。
+# hnswlib 上游的主体形态是 header-only C++ 库(仓库里的 hnswlib/*.h),Python 绑定只是附加组件;
+# 因此功能测试统一按 C++ 形态验证(prebuilt 与 build 两条路径完全一致):
+#   - prebuilt:直接使用预构建镜像里的 /usr/local/include/hnswlib
+#   - build   :从上游官方 tarball 取头文件到任务私有前缀,不写系统路径
+# 头文件没有版本宏,版本识别用"头文件集合的聚合 SHA-256 指纹"(与镜像仓库自带测试同思路)。
 set -euo pipefail
 
 SOFTWARE_NAME="hnswlib"
 CATEGORY="AI"
-SOFTWARE_VERSION="${SOFTWARE_VERSION:-0.8.0}"
+SOFTWARE_VERSION="${SOFTWARE_VERSION:-0.9.0}"
 EXPECTED_ARCH="${EXPECTED_ARCH:-$(uname -m)}"
 FUNC_OS="${FUNC_OS:-}"
 FUNC_HARDWARE="${FUNC_HARDWARE:-}"
@@ -15,18 +19,16 @@ PERF_WORK_DIR="${PERF_WORK_DIR:-}"
 RESULTS_DIR="${RESULTS_DIR:-}"
 PERF_ACTUAL_VERSION_FILE="${PERF_ACTUAL_VERSION_FILE:-}"
 
-# build 模式的取版渠道(分层优先,见 build.sh 的 fetch_hnswlib_* 三层):
-#   hnswlib 官方不提供预编译产物(arm64_binary: na,仅有头文件库 + 源码包),
-#   三方 conda-forge/hnswlib 已打包二进制但普通容器内无 conda,退到等价的 PyPI 源码包现场编译。
-HNSWLIB_PACKAGE_SPEC="hnswlib==${SOFTWARE_VERSION}"
-# 层 3(源码编译)的上游仓库地址。
+# build 模式的上游取版渠道:官方 release tarball(纯头文件,与架构无关)。
+HNSWLIB_ARCHIVE_BASE="${HNSWLIB_ARCHIVE_BASE:-https://github.com/nmslib/hnswlib/archive/refs/tags}"
+# 层 3(兜底)的上游仓库地址。
 HNSWLIB_SOURCE_URL="${HNSWLIB_SOURCE_URL:-https://github.com/nmslib/hnswlib.git}"
-# 国产 Runner 无法稳定访问 files.pythonhosted.org,非 ubuntu 时改用华为云 PyPI 镜像。
-PIP_MIRROR_INDEX="https://mirrors.huaweicloud.com/repository/pypi/simple"
+# 编译探针用的 C++ 编译器。
+CXX="${CXX:-g++}"
 
 # 运行期路径(configure_runtime_paths 里按模式赋值)。
-VENV_DIR=""
-PYBIN=""
+HNSWLIB_PREFIX=""
+HNSWLIB_INCLUDE_DIR=""
 BUILD_DIR=""
 STANDALONE_OWNS_WORK_DIR=0
 STANDALONE_KEEP_WORK_DIR=0
@@ -74,6 +76,68 @@ check_architecture() {
     }
 }
 
+# ---------- 版本指纹 ----------
+# 单个 hnswlib.h 在 0.8.0 与 0.9.0 之间完全相同,必须对整套头文件取聚合指纹才能区分版本。
+# 算法:按文件名(ASCII 序)遍历目录下所有 *.h,把"文件名 + 该文件的 sha256(hex)"依次写入
+# 标准输入,最后对整个流取 sha256。新增待测版本必须在此登记指纹。
+header_aggregate_sha256() {
+    local dir="$1" f
+    [[ -d "${dir}" ]] || return 0
+    {
+        while IFS= read -r f; do
+            printf '%s' "$(basename "${f}")"
+            sha256sum "${f}" | awk '{printf "%s", $1}'
+        done < <(find "${dir}" -maxdepth 1 -type f -name '*.h' | LC_ALL=C sort)
+    } | sha256sum | awk '{print $1}'
+}
+
+expected_header_sha256() {
+    case "$1" in
+        0.9.0)
+            printf '%s\n' "cc9904ab6efe2bb1a863d27ad26f376d95295b0bd9fb0342e27e51440c4347d7"
+            ;;
+        0.8.0)
+            printf '%s\n' "d1e59344692875bd54f8a1624eb934e560d046619ac7e7cc6f37873ef364a706"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# 反向查表:由聚合指纹得到版本号。
+version_of_header_sha256() {
+    case "$1" in
+        cc9904ab6efe2bb1a863d27ad26f376d95295b0bd9fb0342e27e51440c4347d7)
+            printf '0.9.0\n'
+            ;;
+        d1e59344692875bd54f8a1624eb934e560d046619ac7e7cc6f37873ef364a706)
+            printf '0.8.0\n'
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# prebuilt 模式下定位镜像里的头文件目录(镜像把 hnswlib/ 装在 /usr/local/include)。
+resolve_prebuilt_include_dir() {
+    local candidate
+    local -a candidates=(
+        "/usr/local/include/hnswlib"
+        "/usr/include/hnswlib"
+        "/opt/hnswlib/include/hnswlib"
+        "/usr/local/hnswlib/include/hnswlib"
+    )
+    for candidate in "${candidates[@]}"; do
+        if [[ -f "${candidate}/hnswlib.h" ]]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 configure_runtime_paths() {
     if [[ -z "${PERF_RUN_ID}" ]]; then
         PERF_RUN_ID="local-$(date -u '+%Y%m%dT%H%M%SZ')-$$"
@@ -96,19 +160,20 @@ configure_runtime_paths() {
     if [[ -z "${FUNC_OS}" ]]; then
         FUNC_OS="$(detect_os_label)"
     fi
-    # prebuilt 模式:软件已装好在镜像里,直接定位镜像内 python3 校验版本,不安装;
-    # build 模式:装到本次任务私有的虚拟环境,避免污染系统 Python。
-    VENV_DIR="${PERF_WORK_DIR}/${SOFTWARE_NAME}-venv"
     BUILD_DIR="${PERF_WORK_DIR}/build"
+    HNSWLIB_PREFIX="${PERF_WORK_DIR}/hnswlib-prefix"
     if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
-        PYBIN="$(resolve_prebuilt_python || true)"
+        # 镜像已装好:头文件在镜像里,只定位不安装。
+        HNSWLIB_INCLUDE_DIR="$(resolve_prebuilt_include_dir || true)"
     else
-        PYBIN="${VENV_DIR}/bin/python"
+        # 当场取源码:头文件装到本次任务私有前缀。
+        HNSWLIB_INCLUDE_DIR="${HNSWLIB_PREFIX}/include/hnswlib"
     fi
 
     export SOFTWARE_NAME CATEGORY SOFTWARE_VERSION EXPECTED_ARCH FUNC_OS FUNC_HARDWARE FUNC_MODE
     export PERF_RUN_ID PERF_WORK_DIR RESULTS_DIR PERF_ACTUAL_VERSION_FILE TMPDIR
-    export VENV_DIR PYBIN BUILD_DIR
+    export HNSWLIB_ARCHIVE_BASE HNSWLIB_SOURCE_URL CXX
+    export HNSWLIB_PREFIX HNSWLIB_INCLUDE_DIR BUILD_DIR
 }
 
 initialize_runtime() {
@@ -116,47 +181,19 @@ initialize_runtime() {
     mkdir -p "${RESULTS_DIR}" "${PERF_WORK_DIR}" "${TMPDIR}" "${BUILD_DIR}"
 }
 
-# prebuilt 模式下定位预构建镜像里 hnswlib 所在的解释器。
-# 预构建镜像可能把包装在独立的 python 环境(如 conda)而不是系统 python3,
-# 此时用系统 python3 探测不到已安装版本。这里遍历常见解释器位置,取第一个能读到
-# hnswlib 版本的;全都读不到则退回系统 python3,交给版本校验报告差异。
-resolve_prebuilt_python() {
-    local py version
-    local -a candidates=(
-        "$(command -v python3 2>/dev/null || true)"
-        "/usr/bin/python3"
-        "/usr/local/bin/python3"
-        "/opt/conda/bin/python3"
-        "/opt/conda/bin/python"
-        "/opt/miniconda3/bin/python3"
-        "/opt/miniconda3/bin/python"
-        "/usr/local/python3/bin/python3"
-    )
-    for py in "${candidates[@]}"; do
-        [[ -n "${py}" && -x "${py}" ]] || continue
-        version="$("${py}" -c 'import importlib.metadata as m; print(m.version("hnswlib"))' 2>/dev/null || true)"
-        if [[ -n "${version}" ]]; then
-            printf '%s\n' "${py}"
-            return 0
-        fi
-    done
-    command -v python3 2>/dev/null || true
-}
-
-# 通过 import 与包元数据读取已安装 hnswlib 的版本号。
+# 读出已安装 hnswlib 的版本:由头文件集合的聚合指纹反查。
 read_installed_version() {
-    local python_bin="${PYBIN:-python3}" version
-    version="$("${python_bin}" -c 'import importlib.metadata as m; print(m.version("hnswlib"))' 2>/dev/null || true)"
-    if [[ -z "${version}" ]]; then
-        version="$("${python_bin}" -c 'import hnswlib; print(getattr(hnswlib, "__version__", ""))' 2>/dev/null || true)"
-    fi
-    printf '%s\n' "${version}"
+    local dir sha
+    dir="${HNSWLIB_INCLUDE_DIR:-}"
+    [[ -n "${dir}" && -d "${dir}" ]] || return 0
+    sha="$(header_aggregate_sha256 "${dir}")"
+    [[ -n "${sha}" ]] || return 0
+    version_of_header_sha256 "${sha}" || true
 }
 
 # ---------- build 模式:分层获取辅助 ----------
-# 分层顺序:上游官方二进制 → 三方仓库已打包二进制 → 源码编译。
-# 每层安装到任务私有 venv 后用 venv 解释器校验版本,严格等于请求版本才接受;
-# 获取失败或版本不符即回滚该层产物并降级到下一层,三层都不可行才判安装失败。
+# 分层顺序:上游官方 tarball → 三方仓库已打包产物 → 上游 git 源码(兜底)。
+# 每层落地后用聚合指纹校验版本,严格等于请求版本才接受;失败即回滚该层产物并降级。
 
 build_env_version_ok() {
     local actual
@@ -169,10 +206,6 @@ build_env_version_ok() {
     return 1
 }
 
-pip_uninstall_all() {
-    "${VENV_DIR}/bin/pip" uninstall -y hnswlib >/dev/null 2>&1 || true
-}
-
 acquire_build_layers() {
     local layer
     for layer in "$@"; do
@@ -182,7 +215,7 @@ acquire_build_layers() {
             return 0
         fi
         log "layer ${layer} did not yield hnswlib ${SOFTWARE_VERSION}; rolling back"
-        pip_uninstall_all
+        rm -rf -- "${HNSWLIB_PREFIX}"
     done
     log "ERROR: every acquisition layer failed for hnswlib ${SOFTWARE_VERSION}"
     return 40
@@ -220,11 +253,11 @@ install_os_packages() {
     for logical in "$@"; do
         case "${logical}" in
             git) rhel+=(git); debian+=(git) ;;
-            python3) rhel+=(python3); debian+=(python3) ;;
-            pip) rhel+=(python3-pip); debian+=(python3-pip) ;;
-            venv) rhel+=(python3); debian+=(python3-venv) ;;
-            build-tools) rhel+=(gcc gcc-c++ make); debian+=(gcc g++ make) ;;
             curl) rhel+=(curl); debian+=(curl) ;;
+            tar) rhel+=(tar); debian+=(tar) ;;
+            coreutils) rhel+=(coreutils); debian+=(coreutils) ;;
+            findutils) rhel+=(findutils); debian+=(findutils) ;;
+            gxx) rhel+=(gcc-c++); debian+=(g++) ;;
             *)
                 log "ERROR: unknown logical package: ${logical}"
                 return 30
@@ -232,7 +265,7 @@ install_os_packages() {
         esac
     done
     family="$(os_family)"
-    (( ${#debian[@]} == 0 )) && return 0
+    (( ${#rhel[@]} == 0 )) && return 0
     case "${family}" in
         rhel)
             log "installing via dnf: ${rhel[*]}"
@@ -249,34 +282,17 @@ install_os_packages() {
     esac
 }
 
-# build 模式创建虚拟环境所需的命令:python3、pip、venv 模块。
-# hnswlib 在 aarch64 上需要从源码包编译,因此还要编译器与 make;
-# 层3 要 git clone 上游源码,故 git 也是必需命令(PyPI 上并非每个待测版本都有发布)。
-require_python_runtime() {
+# 编译探针 + 取源码所需的命令。
+require_build_commands() {
     local -a logical=()
-    command -v git >/dev/null 2>&1 || logical+=(git)
-    command -v python3 >/dev/null 2>&1 || logical+=(python3)
-    if ! command -v python3 >/dev/null 2>&1 || ! python3 -m pip --version >/dev/null 2>&1; then
-        logical+=(pip)
-    fi
-    if ! command -v python3 >/dev/null 2>&1 || ! python3 -m venv --help >/dev/null 2>&1; then
-        logical+=(venv)
-    fi
-    if ! command -v cc >/dev/null 2>&1 || ! command -v c++ >/dev/null 2>&1 || \
-        ! command -v make >/dev/null 2>&1; then
-        logical+=(build-tools)
-    fi
+    command -v curl >/dev/null 2>&1 || logical+=(curl)
+    command -v tar >/dev/null 2>&1 || logical+=(tar)
+    command -v sha256sum >/dev/null 2>&1 || logical+=(coreutils)
+    command -v find >/dev/null 2>&1 || logical+=(findutils)
+    command -v "${CXX}" >/dev/null 2>&1 || logical+=(gxx)
     (( ${#logical[@]} == 0 )) && return 0
     log "installing missing dependencies: ${logical[*]}"
     install_os_packages "${logical[@]}" || return 30
-}
-
-# pip 索引参数:ubuntu 用默认 PyPI,其它发行版走华为云镜像。
-pip_index_args() {
-    if [[ "$(os_id)" != "ubuntu" ]]; then
-        printf '%s\n' '--trusted-host' 'mirrors.huaweicloud.com' \
-            '--index-url' "${PIP_MIRROR_INDEX}"
-    fi
 }
 
 json_escape() {

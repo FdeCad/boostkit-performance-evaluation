@@ -27,16 +27,18 @@ execution:
   timeout_minutes: 60
 
 # 功能判定项,名称与 functional_result.json 中 checks[].name 一一对应。
-# 判定来源:版本校验 + 两个基于官方 hnswlib Python 绑定的功能 smoke。
-# build 模式分层优先获取(上游官方二进制→三方仓库→源码编译),每层校验版本严格相等;
-# hnswlib 官方仓库的 C++ 基准依赖 sra_test,功能层改用其公开 Python API 的确定性回环。
+# hnswlib 上游的主体形态是 header-only C++ 库,Python 绑定只是附加组件,因此这里统一按
+# C++ 形态验证(prebuilt 与 build 两条路径的判据相同,都用 g++ 编译并运行 HNSW 核心 API)。
+# 头文件没有版本宏,版本识别用整套头文件的聚合 SHA-256 指纹(见 common.sh)。
+# build 模式分层优先获取:上游官方 tarball → 三方仓库产物(无)C++ 头文件包 → git 源码兜底;
+# prebuilt 模式直接使用镜像里 /usr/local/include/hnswlib 下的头文件。
 checks:
   - name: version
-    description: 已安装 hnswlib 版本必须等于请求版本
+    description: 安装的 hnswlib 头文件必须是请求版本(整套头文件的聚合 SHA-256 指纹比对)
   - name: hnsw-knn-roundtrip
-    description: 建索引 add_items 后 knn_query 回环,校验结果形状与自查询召回
-  - name: hnsw-filter
-    description: 带 filter 谓词的 knn_query,校验过滤结果全部满足谓词
+    description: g++ 编译并运行 HNSW addPoint/searchKnn 回环,校验自查询全命中与插值查询标签
+  - name: hnsw-save-reload
+    description: 索引 saveIndex 落盘后重新加载,校验加载后的检索结果一致
 
 outputs:
   functional_result:
