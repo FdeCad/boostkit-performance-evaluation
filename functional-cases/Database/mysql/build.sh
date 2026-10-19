@@ -83,39 +83,41 @@ mysql_archive_descriptor() {
 }
 
 # 离线包优先(沿用性能用例约定):/home/runner/software/mysql/ → 任务目录缓存 → 官方下载。
+# 注意:本函数用 stdout 返回归档路径,所以它内部的诊断信息必须写 stderr,
+# 否则会被调用方的 archive_path="$(fetch_mysql_archive)" 一并捕获,路径里混进日志文本。
 fetch_mysql_archive() {
     local archive_path="${PERF_WORK_DIR}/${MYSQL_ARCHIVE_NAME}"
     local local_archive_path="${MYSQL_OFFLINE_DIR}/${MYSQL_ARCHIVE_NAME}"
     local download_url actual_md5
     if [[ -f "${local_archive_path}" ]]; then
         archive_path="${local_archive_path}"
-        log "using offline MySQL archive ${archive_path}"
+        log "using offline MySQL archive ${archive_path}" >&2
     elif [[ -s "${archive_path}" ]]; then
-        log "using cached MySQL archive ${archive_path}"
+        log "using cached MySQL archive ${archive_path}" >&2
     else
         download_url="https://dev.mysql.com/get/Downloads/${MYSQL_RELEASE_DIR}/${MYSQL_ARCHIVE_NAME}"
-        log "downloading ${download_url}"
+        log "downloading ${download_url}" >&2
         if command -v curl >/dev/null 2>&1; then
             curl -fSL --retry 3 --connect-timeout 30 -o "${archive_path}" "${download_url}" || {
                 rm -f "${archive_path}"
-                log "failed to download ${MYSQL_ARCHIVE_NAME}"
+                log "failed to download ${MYSQL_ARCHIVE_NAME}" >&2
                 return 1
             }
         elif command -v wget >/dev/null 2>&1; then
             wget -q -O "${archive_path}" "${download_url}" || {
                 rm -f "${archive_path}"
-                log "failed to download ${MYSQL_ARCHIVE_NAME}"
+                log "failed to download ${MYSQL_ARCHIVE_NAME}" >&2
                 return 1
             }
         else
-            log "curl or wget is required to download the MySQL archive"
+            log "curl or wget is required to download the MySQL archive" >&2
             return 1
         fi
     fi
     actual_md5="$(md5sum "${archive_path}")"
     actual_md5="${actual_md5%% *}"
     [[ "${actual_md5}" == "${MYSQL_ARCHIVE_MD5}" ]] || {
-        log "MySQL archive checksum mismatch: expected ${MYSQL_ARCHIVE_MD5}, got ${actual_md5}"
+        log "MySQL archive checksum mismatch: expected ${MYSQL_ARCHIVE_MD5}, got ${actual_md5}" >&2
         return 1
     }
     printf '%s\n' "${archive_path}"
