@@ -38,19 +38,19 @@ EOF
 
 # ---------- 阶段:install ----------
 
-# 官方 wheel 仅覆盖支持矩阵内的解释器版本,新增 Python/版本需同步此处声明。
+# 官方 wheel 带 cp310-abi3 标签(稳定 ABI,可被 3.10 及更高版本解释器加载),
+# 因此这里只要求解释器 >= 3.10,而不是把版本钉在某个有限白名单里
+# (ubuntu 26.04 自带的是 python 3.14,更早的白名单写法会把它误判为不支持)。
 supported_python_version() {
-    local python_version
+    local python_version major minor
     python_version="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')" || return 30
-    case "${python_version}" in
-        3.10 | 3.11 | 3.12 | 3.13)
-            printf '%s\n' "${python_version}"
-            ;;
-        *)
-            log "ERROR: system python3 is ${python_version}, but the official OpenViking ${SOFTWARE_VERSION} wheels require one of 3.10-3.13"
-            return 30
-            ;;
-    esac
+    major="${python_version%%.*}"
+    minor="${python_version#*.}"
+    if [[ "${major}" -eq 3 && "${minor}" -ge 10 ]]; then
+        return 0
+    fi
+    log "ERROR: system python3 is ${python_version}, but the official OpenViking ${SOFTWARE_VERSION} wheels require python >= 3.10"
+    return 30
 }
 
 # build 模式:创建任务私有 venv,再分层优先获取 OpenViking(见 common.sh acquire_build_layers)。
@@ -59,7 +59,9 @@ install_openviking_build() {
         log "ERROR: virtual environment is not clean: ${VENV_DIR}"
         return 20
     }
-    supported_python_version >/dev/null || return $?
+    # 不要重定向到 /dev/null:log() 写的是 stdout,重定向会把失败原因一起吞掉,
+    # 让 stage 看起来像"静默退出"。
+    supported_python_version || return $?
     log "creating task-private virtual environment ${VENV_DIR}"
     python3 -m venv "${VENV_DIR}" || {
         log "ERROR: failed to create the virtual environment"
