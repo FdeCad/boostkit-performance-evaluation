@@ -100,7 +100,11 @@ fetch_faiss_source() {
         log "ERROR: failed to install faiss python build dependencies"
         return 40
     }
+    # 必须显式指定解释器:未指定时 faiss 的 FindPython 会探测到系统 python3,
+    # 而 numpy/pip 装在本任务的私有 venv 里,于是找不到 NumPy 头文件而 configure 失败。
     cmake -B "${build}" -S "${src}" \
+        -DPython_EXECUTABLE="${VENV_DIR}/bin/python" \
+        -DPython3_EXECUTABLE="${VENV_DIR}/bin/python" \
         -DFAISS_ENABLE_GPU=OFF -DFAISS_ENABLE_PYTHON=ON -DFAISS_ENABLE_EXTRAS=OFF \
         -DBUILD_TESTING=OFF -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release || {
         log "ERROR: faiss cmake configure failed"

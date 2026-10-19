@@ -198,6 +198,7 @@ install_os_packages() {
             python3) rhel+=(python3); debian+=(python3) ;;
             pip) rhel+=(python3-pip); debian+=(python3-pip) ;;
             venv) rhel+=(python3); debian+=(python3-venv) ;;
+            python-dev) rhel+=(python3-devel); debian+=(python3-dev) ;;
             build-tools) rhel+=(gcc gcc-c++ make); debian+=(gcc g++ make) ;;
             curl) rhel+=(curl); debian+=(curl) ;;
             cmake) rhel+=(cmake); debian+=(cmake) ;;
@@ -242,9 +243,10 @@ require_python_runtime() {
     install_os_packages "${logical[@]}" || return 30
 }
 
-# 层 3(源码编译)所需工具:git + g++/make + cmake + swig + BLAS 开发库。
+# 层 3(源码编译)所需工具:git + g++/make + cmake + swig + BLAS 开发库 + Python 开发头文件。
 require_faiss_source_tools() {
     local -a logical=()
+    local py_include
     command -v git >/dev/null 2>&1 || logical+=(git)
     command -v cmake >/dev/null 2>&1 || logical+=(cmake)
     command -v swig >/dev/null 2>&1 || logical+=(swig)
@@ -254,6 +256,11 @@ require_faiss_source_tools() {
     fi
     if ! pkg-config --exists openblas 2>/dev/null && [[ ! -f /usr/include/openblas_config.h ]]; then
         logical+=(blas)
+    fi
+    # faiss 的 Python 绑定要 Python.h(Development.Module);基础镜像通常只带解释器,不带头文件。
+    py_include="$(python3 -c 'import sysconfig; print(sysconfig.get_path("include"))' 2>/dev/null || true)"
+    if [[ -z "${py_include}" || ! -f "${py_include}/Python.h" ]]; then
+        logical+=(python-dev)
     fi
     (( ${#logical[@]} == 0 )) && return 0
     log "installing source-build dependencies: ${logical[*]}"
