@@ -248,7 +248,7 @@ require_mysql_source_commands() {
 
 # 层 3:从上游源码 tarball 用 CMake 构建并安装到任务私有目录(最后手段)。
 mysql_layer_source() {
-    local src tarball url actual build_dir
+    local src tarball url actual build_dir release_dir
     local -a downloader
     src="${PERF_WORK_DIR}/mysql-source"
     mysql_reset_build_tree
@@ -256,8 +256,10 @@ mysql_layer_source() {
     mkdir -p "${src}"
     require_mysql_source_commands || return 1
 
+    # 源码下载目录随主次版本变化(如 8.0.43 → MySQL-8.0,26.7.0 → MySQL-26.7)。
+    release_dir="MySQL-${SOFTWARE_VERSION%.*}"
     tarball="mysql-${SOFTWARE_VERSION}.tar.gz"
-    url="https://dev.mysql.com/get/Downloads/MySQL-8.0/${tarball}"
+    url="https://dev.mysql.com/get/Downloads/${release_dir}/${tarball}"
     if command -v curl >/dev/null 2>&1; then
         downloader=(curl -fSL --retry 3 --connect-timeout 30 -o "${src}/${tarball}")
     elif command -v wget >/dev/null 2>&1; then

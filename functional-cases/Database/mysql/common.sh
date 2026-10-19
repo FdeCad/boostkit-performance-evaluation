@@ -231,13 +231,15 @@ install_os_packages() {
             curl) rhel+=(curl); debian+=(curl) ;;
             python3) rhel+=(python3); debian+=(python3) ;;
             tar) rhel+=(tar); debian+=(tar) ;;
+            # 官方二进制包是 .tar.xz,基础镜像不含 xz 会导致解压失败。
+            xz) rhel+=(xz); debian+=(xz-utils) ;;
             coreutils) rhel+=(coreutils); debian+=(coreutils) ;;
             build-tools) rhel+=(gcc gcc-c++ make tar gzip); debian+=(gcc g++ make tar gzip) ;;
-            # 源码编译(最后手段)额外依赖:CMake、OpenSSL、ncurses、bison。
+            # 源码编译(最后手段)额外依赖:CMake、OpenSSL、ncurses、bison、libcurl(MySQL 强制 WITH_CURL=system)。
             cmake) rhel+=(cmake); debian+=(cmake) ;;
             mysql-source-deps)
-                rhel+=(openssl-devel ncurses-devel bison bzip2-devel pkgconf-pkg-config)
-                debian+=(libssl-dev libncurses-dev bison libbz2-dev pkg-config)
+                rhel+=(openssl-devel ncurses-devel bison bzip2-devel libcurl-devel pkgconf-pkg-config)
+                debian+=(libssl-dev libncurses-dev bison libbz2-dev libcurl4-openssl-dev pkg-config)
                 ;;
             libaio) rhel+=(libaio); want_debian_libaio=1 ;;
             *)
@@ -272,6 +274,7 @@ require_build_commands() {
     local -a logical=()
     command -v curl >/dev/null 2>&1 || logical+=(curl)
     command -v tar >/dev/null 2>&1 || logical+=(tar)
+    command -v xz >/dev/null 2>&1 || logical+=(xz)
     command -v md5sum >/dev/null 2>&1 || logical+=(coreutils)
     command -v python3 >/dev/null 2>&1 || logical+=(python3)
     if ! ldconfig -p 2>/dev/null | grep -q 'libaio\.so'; then
