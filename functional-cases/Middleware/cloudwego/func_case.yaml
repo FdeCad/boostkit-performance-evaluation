@@ -1,0 +1,56 @@
+# cloudwego (CloudWeGo 套件) 功能测试清单。
+# 独立于性能测试框架 framework/;版本由人工指定,不做 latest 解析。
+name: cloudwego
+category: Middleware
+enabled: true
+
+# 人工指定的待测版本(白名单)。CloudWeGo 是微服务中间件集合,旗下 Kitex/Hertz/Netpoll
+# 等子项目各自独立发版,没有统一的套件版本号;这里以套件旗舰 Kitex 的版本作为套件版本标识
+# (纯数字,无 v 前缀),其余组件版本在 common.sh 中人工维护,改套件版本时需同批核对。
+versions:
+  - "0.16.4"
+
+execution:
+  type: shell-functions
+  stages:
+    prepare:
+      script: build.sh
+      function: func_prepare
+    install:
+      script: build.sh
+      function: func_install
+    check:
+      script: test.sh
+      function: func_check
+    cleanup:
+      script: test.sh
+      function: func_cleanup
+  timeout_minutes: 90
+
+# 功能判定项,名称与 functional_result.json 中 checks[].name 一一对应。
+# 判定来源:优先复用上游测试套件(upstream_command),不足时用内部 smoke 补齐。
+# build 模式(FUNC_MODE=build,ubuntu 官方基础镜像内)按分层优先获取各组件源码,每层版本需严格
+# 等于锁定版本,不匹配则降级:层1 经 GOPROXY 按精确版本拉取 Go module →
+# 层2 三方仓库包(Kitex/Hertz 为纯 Go 库,无预编译产物,结构性不可用)→
+# 层3 git clone 对应 tag(兜底)。
+checks:
+  - name: version
+    description: 套件旗舰 Kitex 的源码版本必须严格等于请求版本
+  # CloudWeGo 各组件自带 go test 用例,即官方测试套件。
+  - name: upstream-test
+    description: 运行 Kitex(client 包)与 Hertz(pkg 包)自带的上游 Go 单元测试
+    upstream_command: go test ./client/... (kitex) && go test ./pkg/... (hertz)
+  - name: smoke
+    description: 用 Hertz 起一个最小 HTTP 服务并回环请求,校验响应内容
+
+outputs:
+  functional_result:
+    path: functional_result.json
+    stage: check
+    format: json
+    required: true
+  cloudwego_test_log:
+    path: cloudwego_test.log
+    stage: check
+    format: text
+    required: true

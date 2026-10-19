@@ -31,22 +31,22 @@ on:
           - protobuf
           - snappy
           - sonic-cpp
-          - sonic-go
           - zstd
           # Media
           - x264
           - x265
           # Middleware
           - brpc
+          - cloudwego
           - envoy
           - kubernetes
           # Storage
           - ceph
           # Toolchain
-          - bishengjdk
           - gcc
           - glibc
           - golang
+          - openjdk
           - python
           - all
       version:
