@@ -18,12 +18,11 @@ PERF_ACTUAL_VERSION_FILE="${PERF_ACTUAL_VERSION_FILE:-}"
 # build 模式的取版渠道(分层优先,见 build.sh 的 fetch_torch_* 三层):
 #   层 1 上游官方二进制 = download.pytorch.org/whl CPU aarch64/x86_64 wheel(config/distribution.yaml primary);
 #   层 2 三方仓库 = PyPI(torch,含 +cpu 本地版本后缀的历史 wheel);
-#   层 3 源码编译 = 官方 github 仓库精确 tag。
+#   层 3 源码编译 = 结构性不可用(编译 PyTorch 需数小时与 20 GiB 以上空间,超出功能测试范围)。
 # 依赖包走华为云 PyPI 镜像(国产 Runner 无法稳定访问 files.pythonhosted.org)。
 PYTORCH_WHEEL_INDEX="${PYTORCH_WHEEL_INDEX:-https://download.pytorch.org/whl/cpu}"
 PYTORCH_DEPENDENCY_INDEX="${PYTORCH_DEPENDENCY_INDEX:-https://mirrors.huaweicloud.com/repository/pypi/simple}"
 PYTORCH_PYPI_INDEX="${PYTORCH_PYPI_INDEX:-https://mirrors.huaweicloud.com/repository/pypi/simple}"
-PYTORCH_SOURCE_URL="${PYTORCH_SOURCE_URL:-https://github.com/pytorch/pytorch.git}"
 TORCH_PACKAGE_SPEC="torch==${SOFTWARE_VERSION}+cpu"
 TORCH_PACKAGE_PLAIN_SPEC="torch==${SOFTWARE_VERSION}"
 
@@ -243,21 +242,6 @@ require_python_runtime() {
     fi
     (( ${#logical[@]} == 0 )) && return 0
     log "installing missing dependencies: ${logical[*]}"
-    install_os_packages "${logical[@]}" || return 30
-}
-
-# 层 3(源码编译)所需工具:git + g++/make + cmake + ninja。
-require_torch_source_tools() {
-    local -a logical=()
-    command -v git >/dev/null 2>&1 || logical+=(git)
-    command -v cmake >/dev/null 2>&1 || logical+=(cmake)
-    command -v ninja >/dev/null 2>&1 || logical+=(ninja)
-    if ! command -v cc >/dev/null 2>&1 || ! command -v c++ >/dev/null 2>&1 || \
-        ! command -v make >/dev/null 2>&1; then
-        logical+=(build-tools)
-    fi
-    (( ${#logical[@]} == 0 )) && return 0
-    log "installing source-build dependencies: ${logical[*]}"
     install_os_packages "${logical[@]}" || return 30
 }
 

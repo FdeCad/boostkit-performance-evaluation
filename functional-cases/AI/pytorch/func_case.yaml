@@ -25,12 +25,13 @@ execution:
       script: test.sh
       function: func_cleanup
   timeout_minutes: 120
-  # 层 3 会克隆 pytorch 源码(含子模块)并现场编译 wheel,峰值远超框架默认值。
-  min_free_disk_gb: 25
+  # 实际走的官方 CPU wheel 路径:wheel + 依赖包 + venv 合计约 2-3 GiB,8 GiB 余量充足。
+  min_free_disk_gb: 8
 
 # 功能判定项,名称与 functional_result.json 中 checks[].name 一一对应。
 # 判定来源:版本校验 + 两个基于官方 torch 算子的功能 smoke。
-# build 模式分层优先获取(官方 CPU wheel→三方 PyPI→源码编译),每层校验版本(裁 +cpu 后)严格相等;
+# build 模式分层优先获取(官方 CPU wheel→三方 PyPI),每层校验版本(裁 +cpu 后)严格相等;
+# 源码编译层因耗时数小时、峰值 20 GiB 以上,远超功能测试范围,已声明为结构性不可用;
 # 官方 CPU wheel 不随附上游测试树,这里用确定性的算子回环替代上游套件。
 checks:
   - name: version

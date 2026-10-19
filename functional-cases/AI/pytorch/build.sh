@@ -102,37 +102,12 @@ fetch_torch_third_party() {
 }
 
 # 层 3:源码编译(最后手段)。
-# 克隆官方仓库精确 tag v${SOFTWARE_VERSION},用官方构建前端现场编译 CPU-only wheel。
+#   PyTorch 从源码编译需要数小时与 20 GiB 以上的构建空间,而本用例的 timeout 是 120 分钟,
+#   该层在功能测试内不可能成功,故结构性不可用。此前为它把磁盘预检抬到 25 GiB,
+#   结果反而拦住了实际可用的官方 wheel 路径(见 func_case.yaml 的 min_free_disk_gb)。
 fetch_torch_source() {
-    require_torch_source_tools || return $?
-    local -a index_args=()
-    mapfile -t index_args < <(pip_pypi_index_args)
-    local src="${BUILD_DIR}/pytorch-source"
-    rm -rf -- "${src}"
-    log "layer 3: cloning pytorch v${SOFTWARE_VERSION} from ${PYTORCH_SOURCE_URL}"
-    GIT_TERMINAL_PROMPT=0 git clone --branch "v${SOFTWARE_VERSION}" --recursive --depth 1 \
-        "${PYTORCH_SOURCE_URL}" "${src}" || {
-        log "ERROR: failed to clone pytorch v${SOFTWARE_VERSION}"
-        return 30
-    }
-    "${VENV_DIR}/bin/pip" install --no-cache-dir --disable-pip-version-check \
-        "${index_args[@]}" numpy pyyaml typing_extensions requests setuptools || {
-        log "ERROR: failed to install torch python build dependencies"
-        return 40
-    }
-    (cd "${src}" && BUILD_TEST=0 USE_CUDA=0 USE_ROCM=0 USE_MKLDNN=0 \
-        "${VENV_DIR}/bin/python" -m pip wheel --no-deps --no-cache-dir \
-        -w "${BUILD_DIR}/torch-wheel" .) || {
-        log "ERROR: pytorch source build failed"
-        return 40
-    }
-    "${VENV_DIR}/bin/pip" install --no-cache-dir --disable-pip-version-check \
-        --no-deps "${BUILD_DIR}"/torch-wheel/torch-*.whl || {
-        log "ERROR: failed to install the source-built torch wheel"
-        return 40
-    }
-    "${VENV_DIR}/bin/pip" install --no-cache-dir --disable-pip-version-check \
-        "${index_args[@]}" numpy
+    log "layer 3: a PyTorch source build needs hours and >20 GiB of space; out of scope here"
+    return 1
 }
 
 func_install() {
