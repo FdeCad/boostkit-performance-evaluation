@@ -122,8 +122,12 @@ rocksdb_layer_source() {
         return 1
     }
     log "building rocksdb db_bench"
+    # 老版本 rocksdb(如 7.9.2)靠标准库头文件的间接包含取得 uint64_t,而 GCC 13 起不再
+    # 隐式提供,ubuntu 26.04 的 GCC 会让它整片报 "'uint64_t' has not been declared";
+    # 用 EXTRA_CXXFLAGS 预包含 <cstdint>(Makefile 里是 CXXFLAGS += ${EXTRA_CXXFLAGS})。
     (cd "${SOURCE_DIR}" && export PORTABLE=1 DEBUG_LEVEL=0 && \
-        make db_bench -j"$(nproc)" DISABLE_WARNING_AS_ERROR=1 DISABLE_JEMALLOC=1) || {
+        make db_bench -j"$(nproc)" DISABLE_WARNING_AS_ERROR=1 DISABLE_JEMALLOC=1 \
+            EXTRA_CXXFLAGS="-include cstdint") || {
         log "rocksdb build failed"
         rocksdb_reset_source_tree
         return 1
