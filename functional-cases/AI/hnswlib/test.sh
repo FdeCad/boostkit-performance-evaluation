@@ -171,8 +171,8 @@ PY
 
 func_check() {
     initialize_runtime || return $?
-    # 编译探针需要 g++(build 模式已在 install 阶段装好;prebuilt 镜像自带 gcc-c++)。
-    require_build_commands || return $?
+    # 编译探针需要 g++ 与 sha256sum(build 模式已在 install 阶段装好;prebuilt 镜像自带)。
+    require_check_commands || return $?
     [[ -n "${HNSWLIB_INCLUDE_DIR}" && -d "${HNSWLIB_INCLUDE_DIR}" ]] || {
         log "ERROR: hnswlib headers are unavailable: ${HNSWLIB_INCLUDE_DIR:-unset}"
         return 40
@@ -193,6 +193,7 @@ func_check() {
         version_detail="hnswlib ${actual} (header fingerprint matched)"
     else
         version_detail="hnswlib ${actual:-unknown}, expected ${SOFTWARE_VERSION}"
+        log_headers_diagnostic "${HNSWLIB_INCLUDE_DIR:-}" >>"${log_file}" 2>&1
     fi
     printf 'version: %s (%s)\n' "${version_status}" "${version_detail}" >>"${log_file}"
 

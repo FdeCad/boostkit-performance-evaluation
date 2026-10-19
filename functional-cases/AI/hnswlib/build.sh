@@ -123,6 +123,8 @@ func_install() {
     check_architecture || return $?
 
     local actual
+    # 指纹识别与编译探针都依赖 coreutils 的 sha256sum 与 C++ 编译器,两种模式都需要。
+    require_check_commands || return $?
     if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
         # 镜像已装好:头文件在镜像里,只做指纹校验。
         [[ -n "${HNSWLIB_INCLUDE_DIR}" && -d "${HNSWLIB_INCLUDE_DIR}" ]] || {
@@ -142,6 +144,7 @@ func_install() {
     actual="$(read_installed_version)"
     [[ -n "${actual}" ]] || {
         log "ERROR: cannot identify the installed hnswlib version from ${HNSWLIB_INCLUDE_DIR:-<none>}"
+        log_headers_diagnostic "${HNSWLIB_INCLUDE_DIR:-}"
         return 40
     }
     [[ "${actual}" == "${SOFTWARE_VERSION}" ]] || {

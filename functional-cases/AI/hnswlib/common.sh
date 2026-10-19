@@ -80,15 +80,37 @@ check_architecture() {
 # 单个 hnswlib.h 在 0.8.0 与 0.9.0 之间完全相同,必须对整套头文件取聚合指纹才能区分版本。
 # 算法:按文件名(ASCII 序)遍历目录下所有 *.h,把"文件名 + 该文件的 sha256(hex)"依次写入
 # 标准输入,最后对整个流取 sha256。新增待测版本必须在此登记指纹。
+# 只依赖 coreutils 的 sha256sum 与 bash 内建:精简的基础镜像里不一定有 find/awk,
+# 一旦缺失会静默算出错误的聚合值(表现为"指纹对不上任何已知版本")。
 header_aggregate_sha256() {
-    local dir="$1" f
+    local dir="$1" f hash
     [[ -d "${dir}" ]] || return 0
-    {
-        while IFS= read -r f; do
-            printf '%s' "$(basename "${f}")"
-            sha256sum "${f}" | awk '{printf "%s", $1}'
-        done < <(find "${dir}" -maxdepth 1 -type f -name '*.h' | LC_ALL=C sort)
-    } | sha256sum | awk '{print $1}'
+    command -v sha256sum >/dev/null 2>&1 || return 0
+    (
+        # LC_ALL=C 让 glob 按字节序展开,保证与登记指纹时的文件顺序一致。
+        LC_ALL=C
+        for f in "${dir}"/*.h; do
+            [[ -f "${f}" ]] || continue
+            printf '%s' "${f##*/}"
+            hash="$(sha256sum "${f}")" || return 1
+            printf '%s' "${hash%% *}"
+        done
+    ) | sha256sum | { read -r out _; printf '%s\n' "${out}"; }
+}
+
+# 诊断:打印头文件目录的实际聚合指纹与逐文件 sha256,便于与登记值比对。
+log_headers_diagnostic() {
+    local dir="$1" f hash
+    [[ -n "${dir}" && -d "${dir}" ]] || {
+        log "diagnostic: header directory is absent: ${dir:-<none>}"
+        return 0
+    }
+    log "diagnostic: aggregate=$(header_aggregate_sha256 "${dir}") dir=${dir}"
+    for f in "${dir}"/*.h; do
+        [[ -f "${f}" ]] || continue
+        hash="$(sha256sum "${f}" 2>/dev/null || true)"
+        log "diagnostic:   ${f##*/} ${hash%% *}"
+    done
 }
 
 expected_header_sha256() {
@@ -256,7 +278,6 @@ install_os_packages() {
             curl) rhel+=(curl); debian+=(curl) ;;
             tar) rhel+=(tar); debian+=(tar) ;;
             coreutils) rhel+=(coreutils); debian+=(coreutils) ;;
-            findutils) rhel+=(findutils); debian+=(findutils) ;;
             gxx) rhel+=(gcc-c++); debian+=(g++) ;;
             *)
                 log "ERROR: unknown logical package: ${logical}"
@@ -282,13 +303,22 @@ install_os_packages() {
     esac
 }
 
-# 编译探针 + 取源码所需的命令。
+# build 模式取源码 + 编译探针所需的命令。
 require_build_commands() {
     local -a logical=()
     command -v curl >/dev/null 2>&1 || logical+=(curl)
     command -v tar >/dev/null 2>&1 || logical+=(tar)
     command -v sha256sum >/dev/null 2>&1 || logical+=(coreutils)
-    command -v find >/dev/null 2>&1 || logical+=(findutils)
+    command -v "${CXX}" >/dev/null 2>&1 || logical+=(gxx)
+    (( ${#logical[@]} == 0 )) && return 0
+    log "installing missing dependencies: ${logical[*]}"
+    install_os_packages "${logical[@]}" || return 30
+}
+
+# 指纹识别与编译探针所需的命令:prebuilt 模式同样需要(精简镜像里可能缺 sha256sum)。
+require_check_commands() {
+    local -a logical=()
+    command -v sha256sum >/dev/null 2>&1 || logical+=(coreutils)
     command -v "${CXX}" >/dev/null 2>&1 || logical+=(gxx)
     (( ${#logical[@]} == 0 )) && return 0
     log "installing missing dependencies: ${logical[*]}"
