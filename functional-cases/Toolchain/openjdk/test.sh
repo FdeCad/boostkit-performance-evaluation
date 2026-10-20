@@ -130,6 +130,13 @@ func_check() {
     if [[ "${version_status}" != "passed" || "${upstream_status}" != "passed" || "${smoke_status}" != "passed" ]]; then
         overall="failed"
     fi
+    # 成功路径下 javac/java 不产生多余输出,check.log 会一直是空文件;
+    # 框架要求该输出非空,故这里显式落一份判定摘要。
+    {
+        printf 'version: %s (%s)\n' "${version_status}" "${version_detail}"
+        printf 'upstream-test: %s (%s)\n' "${upstream_status}" "${upstream_detail}"
+        printf 'smoke: %s (%s)\n' "${smoke_status}" "${smoke_detail}"
+    } >>"${RESULTS_DIR}/check.log"
     write_functional_result "${overall}" \
         "version" "${version_status}" "${version_detail}" \
         "upstream-test" "${upstream_status}" "${upstream_detail}" \
