@@ -44,7 +44,7 @@ checks:
     description: 运行官方发行版自带的 SparkPi 示例并断言作业成功输出 Pi 估计值
     upstream_command: bin/spark-submit --class org.apache.spark.examples.SparkPi examples/jars/spark-examples_*.jar 10
   - name: pyspark-smoke
-    description: 用 pyspark 断言 spark.range(10).count() == 10
+    description: 用 pyspark 断言 spark.range(10).count() == 10;Spark<3.4 且容器 Python≥3.13 时跳过(3.3 的 pyspark 依赖 typing.io,Python 3.13 起移除),状态记为 skipped 不影响整体通过
 
 outputs:
   functional_result:
