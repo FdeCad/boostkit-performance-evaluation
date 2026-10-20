@@ -23,8 +23,14 @@ def compute(n):
     return n + 1
 PY
     "${PYTHON_BIN}" -m compileall -q "${dir}" || return 1
-    find "${dir}" -name '*.pyc' -print -quit | grep -q . || return 1
-    "${PYTHON_BIN}" - "$SOFTWARE_VERSION" "${dir}" <<'PY' | grep -qx python-smoke-ok
+    # 用解释器自身确认字节码产物,避免依赖镜像里可能缺失的 find。
+    "${PYTHON_BIN}" - "${dir}" <<'PY' || return 1
+import pathlib
+import sys
+
+sys.exit(0 if next(pathlib.Path(sys.argv[1]).rglob("*.pyc"), None) else 1)
+PY
+    "${PYTHON_BIN}" - "$SOFTWARE_VERSION" "${dir}" <<'PY' || return 1
 import sys
 
 expected = tuple(int(part) for part in sys.argv[1].split(".")[:2])
