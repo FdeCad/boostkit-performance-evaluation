@@ -160,24 +160,36 @@ mysql_reset_build_tree() {
 
 # ---------- 分层获取 ----------
 
+# 检查官方二进制的运行库是否齐全:mysqld 缺库是起不来,而 mysql/mysqlslap 这类客户端
+# 缺库(ncurses 之类)是连进程都加载不了,所以四个可执行文件都要过一遍 ldd,并把每个
+# 缺失的库逐行打印出来,便于一次看清。
+mysql_check_binary_runtime_libs() {
+    local binary missing found=0
+    for binary in "${MYSQLD_BIN}" "${MYSQL_BIN}" "${MYSQLADMIN_BIN}" "${MYSQLSLAP_BIN}"; do
+        [[ -x "${binary}" ]] || continue
+        missing="$(ldd "${binary}" 2>&1 | grep 'not found' || true)"
+        [[ -n "${missing}" ]] || continue
+        log "$(basename "${binary}") misses runtime libraries:"
+        while IFS= read -r line; do
+            log "  ${line}"
+        done <<<"${missing}"
+        found=1
+    done
+    (( found == 0 ))
+}
+
 # 层 1:上游官方二进制(Linux Generic 预编译包),版本必须严格等于请求版本。
 mysql_layer_upstream_binary() {
-    local archive_path actual missing
+    local archive_path actual
     mysql_archive_descriptor || return 1
     archive_path="$(fetch_mysql_archive)" || return 1
     extract_mysql_archive "${archive_path}" || { mysql_reset_build_tree; return 1; }
     [[ -x "${MYSQLD_BIN}" && -x "${MYSQL_BIN}" ]] || { mysql_reset_build_tree; return 1; }
-    # 官方二进制对运行库是硬依赖(缺库时进程连加载都过不去),所以把 ldd 里所有
-    # not found 的行都打出来,便于一次看清缺了哪些库,而不是只盯 libaio 一个。
-    missing="$(ldd "${MYSQLD_BIN}" 2>&1 | grep 'not found' || true)"
-    if [[ -n "${missing}" ]]; then
-        log "official binary misses runtime libraries:"
-        while IFS= read -r line; do
-            log "  ${line}"
-        done <<<"${missing}"
+    mysql_check_binary_runtime_libs || {
+        log "official binary is not runnable: runtime libraries are missing"
         mysql_reset_build_tree
         return 1
-    fi
+    }
     actual="$(mysqld_version "${MYSQLD_BIN}" || true)"
     [[ "${actual}" == "${SOFTWARE_VERSION}" ]] || {
         log "official binary is ${actual:-unknown}, expected ${SOFTWARE_VERSION}"

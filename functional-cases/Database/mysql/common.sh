@@ -270,6 +270,8 @@ install_os_packages() {
             libaio) rhel+=(libaio); want_debian_libaio=1 ;;
             # 通用二进制里的 mysqld 还链了 libnuma。
             numa) rhel+=(numactl-libs); debian+=(libnuma1) ;;
+            # mysql/mysqlslap 这些客户端链了 ncurses(交互编辑),缺了客户端连加载都过不去。
+            ncurses) rhel+=(ncurses-libs); debian+=(libncurses6 libtinfo6) ;;
             *)
                 log "ERROR: unknown logical package: ${logical}"
                 return 30
@@ -311,11 +313,14 @@ require_build_commands() {
     if ! ldconfig -p 2>/dev/null | grep -q 'libnuma\.so'; then
         logical+=(numa)
     fi
+    if ! ldconfig -p 2>/dev/null | grep -q 'libncurses\.so\.6'; then
+        logical+=(ncurses)
+    fi
     if (( ${#logical[@]} > 0 )); then
         log "installing missing dependencies: ${logical[*]}"
         install_os_packages "${logical[@]}" || return 30
     fi
-    # libnuma 装好后不用特殊处理,libaio 则要保证官方二进制找得到 libaio.so.1。
+    # libnuma/ncurses 装好即用,libaio 则要保证官方二进制找得到 libaio.so.1。
     ensure_libaio_soname_compat || log "WARN: could not provide libaio.so.1 for the official binary"
     return 0
 }
