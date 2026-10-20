@@ -124,7 +124,10 @@ def build_context(args: argparse.Namespace, case: dict[str, Any], config: dict[s
         image = os_spec["image"]
     else:
         image = compose_image(
-            os_spec["image_template"], software, args.version, args.architecture
+            os_spec["image_template"],
+            case.get("image_name") or software,
+            args.version,
+            args.architecture,
         )
     output_dir = (
         ROOT / config["output_root"] / category / software / args.version

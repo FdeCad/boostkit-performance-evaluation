@@ -5,7 +5,7 @@ set -euo pipefail
 
 SOFTWARE_NAME="openjdk"
 CATEGORY="Toolchain"
-SOFTWARE_VERSION="${SOFTWARE_VERSION:-28}"
+SOFTWARE_VERSION="${SOFTWARE_VERSION:-28_19}"
 EXPECTED_ARCH="${EXPECTED_ARCH:-$(uname -m)}"
 FUNC_OS="${FUNC_OS:-}"
 FUNC_HARDWARE="${FUNC_HARDWARE:-}"
@@ -42,22 +42,31 @@ java_feature_of() {
     java_version_of "$1" | sed -n 's/^\([0-9][0-9]*\).*/\1/p' | head -n 1 || true
 }
 
+# 版本串可能是 "28"(纯 feature)或 "28_19"/"28+19"(feature_build,与镜像 tag 对齐);
+# 上游 jdk.java.net 与 Adoptium 只按 feature 号取版本,故统一派生请求的 feature 号。
+requested_feature() {
+    printf '%s\n' "${SOFTWARE_VERSION%%[+_]*}"
+}
+
 # prebuilt 模式下定位镜像内已装好的 java:依次探测常见位置,
-# 优先返回 feature 号与请求版本一致的二进制,否则返回首个可执行文件(交给版本校验报告差异)。
+# 优先返回 feature 号与请求 feature 一致的二进制,否则返回首个可执行文件(交给版本校验报告差异)。
 resolve_prebuilt_java() {
-    local candidate fallback="" feature
+    local candidate fallback="" feature requested
+    requested="$(requested_feature)"
     local -a candidates=(
         "$(command -v java 2>/dev/null || true)"
         "${JAVA_HOME:-}/bin/java"
-        "/usr/lib/jvm/java-${SOFTWARE_VERSION}-openjdk/bin/java"
-        "/usr/lib/jvm/java-${SOFTWARE_VERSION}-openjdk-${EXPECTED_ARCH}/bin/java"
-        "/usr/lib/jvm/openjdk-${SOFTWARE_VERSION}/bin/java"
+        "/usr/lib/jvm/java-${requested}-openjdk/bin/java"
+        "/usr/lib/jvm/java-${requested}-openjdk-${EXPECTED_ARCH}/bin/java"
+        "/usr/lib/jvm/openjdk-${requested}/bin/java"
         "/usr/lib/jvm/default-java/bin/java"
         "/opt/java/openjdk/bin/java"
         "/opt/openjdk/bin/java"
-        "/opt/openjdk-${SOFTWARE_VERSION}/bin/java"
+        "/opt/openjdk-${requested}/bin/java"
         "/usr/local/openjdk/bin/java"
-        "/usr/local/openjdk-${SOFTWARE_VERSION}/bin/java"
+        "/usr/local/openjdk-${requested}/bin/java"
+        # openeulertest/openjdk 镜像把 JDK 装在 /usr/local/java 并设了 JAVA_HOME。
+        "/usr/local/java/bin/java"
         "/usr/bin/java"
         "/usr/local/bin/java"
     )
@@ -65,7 +74,7 @@ resolve_prebuilt_java() {
         [[ -n "${candidate}" && -x "${candidate}" ]] || continue
         [[ -n "${fallback}" ]] || fallback="${candidate}"
         feature="$(java_feature_of "${candidate}")"
-        if [[ "${feature}" == "${SOFTWARE_VERSION}" ]]; then
+        if [[ "${feature}" == "${requested}" ]]; then
             printf '%s\n' "${candidate}"
             return 0
         fi

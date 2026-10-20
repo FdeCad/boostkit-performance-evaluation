@@ -43,13 +43,14 @@ EOF
 # jdk.java.net/<feature>/ 会列出当前 GA 或 EA 的二进制(含 linux-aarch64/x64)并给出 .sha256。
 # 页面结构可能随发行变动,故不硬编码 build 号,而是解析页面取当前 linux 二进制链接。
 install_openjdk_official_binary() {
-    local page url href filename archive sha_url expected actual
+    local page url href filename archive sha_url expected actual feature
+    feature="$(requested_feature)"
     if [[ -e "${JDK_HOME}" ]]; then
         log "ERROR: installation directory is not clean: ${JDK_HOME}"
         return 20
     fi
-    log "layer1: querying ${JDK_PAGE_BASE}/${SOFTWARE_VERSION}/ for the linux-${JDK_ARCH} binary"
-    page="$(curl -fsSL --retry 3 --connect-timeout 30 "${JDK_PAGE_BASE}/${SOFTWARE_VERSION}/")" || {
+    log "layer1: querying ${JDK_PAGE_BASE}/${feature}/ for the linux-${JDK_ARCH} binary"
+    page="$(curl -fsSL --retry 3 --connect-timeout 30 "${JDK_PAGE_BASE}/${feature}/")" || {
         log "layer1: failed to fetch the JDK download page"
         return 30
     }
@@ -57,7 +58,7 @@ install_openjdk_official_binary() {
         | grep -oE 'download\.java\.net[^"]*_linux-'"${JDK_ARCH}"'_bin\.tar\.gz' \
         | head -n 1 || true)"
     [[ -n "${href}" ]] || {
-        log "layer1: no linux-${JDK_ARCH} binary is listed for JDK ${SOFTWARE_VERSION}"
+        log "layer1: no linux-${JDK_ARCH} binary is listed for JDK ${feature}"
         return 30
     }
     url="https://${href}"
@@ -90,7 +91,7 @@ install_openjdk_official_binary() {
         log "layer1: extracted JDK is missing bin/java or bin/javac"
         return 30
     }
-    log "layer1: installed OpenJDK ${SOFTWARE_VERSION} from ${url}"
+    log "layer1: installed OpenJDK ${feature} from ${url}"
     return 0
 }
 
@@ -98,22 +99,23 @@ install_openjdk_official_binary() {
 #   OpenJDK 官方不在发行版仓库外分发 GA 前的版本,GA 后由 Adoptium 提供版本化下载;
 #   这里按 Adoptium 的 API 取 Temurin 二进制(GA 之前该 API 返回 404,自然降级到层3)。
 install_openjdk_layer_repo_package() {
-    local api_url archive
-    api_url="${ADOPTIUM_API_BASE}/${SOFTWARE_VERSION}/ga/linux/${JDK_ARCH}/jdk/hotspot/normal/eclipse?project=jdk"
-    archive="${PERF_WORK_DIR}/temurin-${SOFTWARE_VERSION}.tar.gz"
-    log "layer2: querying the Adoptium Temurin API for JDK ${SOFTWARE_VERSION}"
+    local api_url archive feature
+    feature="$(requested_feature)"
+    api_url="${ADOPTIUM_API_BASE}/${feature}/ga/linux/${JDK_ARCH}/jdk/hotspot/normal/eclipse?project=jdk"
+    archive="${PERF_WORK_DIR}/temurin-${feature}.tar.gz"
+    log "layer2: querying the Adoptium Temurin API for JDK ${feature}"
     if curl -fsSL --retry 2 --connect-timeout 30 -o "${archive}" "${api_url}"; then
         rm -rf -- "${JDK_HOME}"
         mkdir -p "${JDK_HOME}" || return 1
         if tar -xzf "${archive}" -C "${JDK_HOME}" --strip-components=1; then
             rm -f "${archive}"
             [[ -x "${JAVA_BIN}" && -x "${JAVAC_BIN}" ]] || return 1
-            log "layer2: installed Temurin JDK ${SOFTWARE_VERSION} for ${JDK_ARCH}"
+            log "layer2: installed Temurin JDK ${feature} for ${JDK_ARCH}"
             return 0
         fi
         rm -f "${archive}"
     fi
-    log "layer2: the Adoptium API has no Temurin build for JDK ${SOFTWARE_VERSION}; downgrade"
+    log "layer2: the Adoptium API has no Temurin build for JDK ${feature}; downgrade"
     return 1
 }
 
@@ -149,7 +151,8 @@ func_install() {
     initialize_runtime || return $?
     check_architecture || return $?
 
-    local actual feature
+    local actual feature requested
+    requested="$(requested_feature)"
     if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
         # 镜像已装好:只定位并校验版本。
         [[ -x "${JAVA_BIN}" ]] || {
@@ -168,8 +171,8 @@ func_install() {
     }
     actual="$(java_version_of "${JAVA_BIN}")"
     feature="$(java_feature_of "${JAVA_BIN}")"
-    [[ "${feature}" == "${SOFTWARE_VERSION}" ]] || {
-        log "ERROR: JDK feature ${feature:-unknown} (java ${actual:-unknown}), expected ${SOFTWARE_VERSION}"
+    [[ "${feature}" == "${requested}" ]] || {
+        log "ERROR: JDK feature ${feature:-unknown} (java ${actual:-unknown}), expected ${requested}"
         return 40
     }
     mkdir -p "$(dirname "${PERF_ACTUAL_VERSION_FILE}")"
@@ -186,7 +189,7 @@ Capture the environment and prepare OpenJDK for one OS/hardware cell.
   --mode prebuilt | build   (default: ${FUNC_MODE})
 
 Options:
-  --version VERSION    JDK feature version (default: ${SOFTWARE_VERSION})
+  --version VERSION    JDK version: feature(27)或 feature_build(28_19),默认 ${SOFTWARE_VERSION}
   --results-dir DIR    Persistent result directory
   --os OS_LABEL        OS label (default: detect from /etc/os-release)
   --hardware HW_LABEL  Hardware label, e.g. kunpeng920

@@ -187,6 +187,12 @@ def validate_case(
         errors.append("name must be a non-empty string")
     if not isinstance(category, str) or not category:
         errors.append("category must be a non-empty string")
+    # 可选:预构建镜像仓库名与用例目录名不一致时(如 golang -> go)在此声明。
+    image_name = case.get("image_name")
+    if image_name is not None and (
+        not isinstance(image_name, str) or not image_name or "/" in image_name
+    ):
+        errors.append("image_name must be a non-empty repository name without '/'")
 
     try:
         relative = path.resolve().relative_to((root / CASES_DIRNAME).resolve())
@@ -418,7 +424,10 @@ def build_matrix(
                     image = os_spec["image"]
                 else:
                     image = compose_image(
-                        os_spec["image_template"], case_name, case_version, architecture
+                        os_spec["image_template"],
+                        case.get("image_name") or case_name,
+                        case_version,
+                        architecture,
                     )
                 for hardware_name in hardware_names:
                     if selected_hardware is not None and hardware_name not in selected_hardware:

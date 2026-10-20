@@ -2,6 +2,9 @@
 # 独立于性能测试框架 framework/;版本由人工指定,不做 latest 解析。
 name: golang
 category: Toolchain
+# 预构建镜像的仓库名是 go(而非用例名 golang):
+# openeulertest/go:{version}-oe2403sp4-{arch}。
+image_name: go
 enabled: true
 
 # 人工指定的待测版本(白名单),与 software/Toolchain/golang/case.yaml 一致。

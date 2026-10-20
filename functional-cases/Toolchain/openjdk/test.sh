@@ -97,16 +97,17 @@ func_check() {
     local version_status="failed" version_detail=""
     local upstream_status="failed" upstream_detail=""
     local smoke_status="failed" smoke_detail=""
-    local actual feature
+    local actual feature requested
 
     # 1) 版本(java -version 打到 stderr;GA/EA 只在 feature 号上可比)
+    requested="$(requested_feature)"
     actual="$(java_version_of "${JAVA_BIN}")"
     feature="$(java_feature_of "${JAVA_BIN}")"
-    if [[ "${feature}" == "${SOFTWARE_VERSION}" ]]; then
+    if [[ "${feature}" == "${requested}" ]]; then
         version_status="passed"
         version_detail="java ${actual} (feature ${feature})"
     else
-        version_detail="java feature ${feature:-unknown} (java ${actual:-unknown}), expected ${SOFTWARE_VERSION}"
+        version_detail="java feature ${feature:-unknown} (java ${actual:-unknown}), expected ${requested}"
     fi
 
     # 2) 上游测试(替代):javac 编译 + java 运行 Hello。
@@ -174,7 +175,7 @@ Usage: $(basename "$0") [OPTIONS]
 Run the OpenJDK functional checks and clean up for one OS/hardware cell.
 
 Options:
-  --version VERSION    JDK feature version (default: ${SOFTWARE_VERSION})
+  --version VERSION    JDK version: feature(27)或 feature_build(28_19),默认 ${SOFTWARE_VERSION}
   --results-dir DIR    Persistent result directory
   --os OS_LABEL        OS label (default: detect from /etc/os-release)
   --hardware HW_LABEL  Hardware label, e.g. kunpeng920
