@@ -20,6 +20,14 @@ PERF_ACTUAL_VERSION_FILE="${PERF_ACTUAL_VERSION_FILE:-}"
 # 运行时,第三方层改用等价的预编译 PyPI wheel faiss-cpu。
 FAISS_SOURCE_URL="${FAISS_SOURCE_URL:-https://github.com/facebookresearch/faiss.git}"
 FAISS_PACKAGE_SPEC="faiss-cpu==${SOFTWARE_VERSION}"
+# 装 faiss-cpu wheel 用的 CPython 版本。faiss-cpu 的 Linux wheel 是 cpXX 专属标签:
+# 1.8.0 只有 cp38-cp312,1.15.x 起才是 cp310-abi3;ubuntu 26.04 自带 python 3.14,
+# 选不到 1.8.0 的 wheel,而 venv 无法改变解释器版本,故用 uv 拉一个真正独立的 CPython
+# 装到本任务私有目录。3.12 同时命中 1.8.0 的 cp312 wheel 和 1.15.1 的 cp310-abi3 wheel。
+FAISS_PYTHON_VERSION="${FAISS_PYTHON_VERSION:-3.12}"
+# 上游官方 uv(astral-sh)发布地址,用于获取固定版本的 CPython。
+UV_VERSION="${UV_VERSION:-0.13.1}"
+UV_RELEASE_BASE="${UV_RELEASE_BASE:-https://github.com/astral-sh/uv/releases/download}"
 # 国产 Runner 无法稳定访问 files.pythonhosted.org,非 ubuntu 时改用华为云 PyPI 镜像。
 PIP_MIRROR_INDEX="https://mirrors.huaweicloud.com/repository/pypi/simple"
 
@@ -27,6 +35,9 @@ PIP_MIRROR_INDEX="https://mirrors.huaweicloud.com/repository/pypi/simple"
 VENV_DIR=""
 PYBIN=""
 BUILD_DIR=""
+UV_DIR=""
+UV_BIN=""
+UV_PYTHON_DIR=""
 STANDALONE_OWNS_WORK_DIR=0
 STANDALONE_KEEP_WORK_DIR=0
 
@@ -99,6 +110,9 @@ configure_runtime_paths() {
     # build 模式:装到本次任务私有的虚拟环境,避免污染系统 Python。
     VENV_DIR="${PERF_WORK_DIR}/${SOFTWARE_NAME}-venv"
     BUILD_DIR="${PERF_WORK_DIR}/build"
+    UV_DIR="${PERF_WORK_DIR}/uv"
+    UV_BIN="${UV_DIR}/uv"
+    UV_PYTHON_DIR="${PERF_WORK_DIR}/uv-python"
     if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
         PYBIN="$(command -v python3 2>/dev/null || true)"
     else
@@ -108,6 +122,7 @@ configure_runtime_paths() {
     export SOFTWARE_NAME CATEGORY SOFTWARE_VERSION EXPECTED_ARCH FUNC_OS FUNC_HARDWARE FUNC_MODE
     export PERF_RUN_ID PERF_WORK_DIR RESULTS_DIR PERF_ACTUAL_VERSION_FILE TMPDIR
     export VENV_DIR PYBIN BUILD_DIR
+    export FAISS_PYTHON_VERSION UV_VERSION UV_RELEASE_BASE UV_DIR UV_BIN UV_PYTHON_DIR
 }
 
 initialize_runtime() {
@@ -196,11 +211,10 @@ install_os_packages() {
         case "${logical}" in
             git) rhel+=(git); debian+=(git) ;;
             python3) rhel+=(python3); debian+=(python3) ;;
-            pip) rhel+=(python3-pip); debian+=(python3-pip) ;;
-            venv) rhel+=(python3); debian+=(python3-venv) ;;
             python-dev) rhel+=(python3-devel); debian+=(python3-dev) ;;
             build-tools) rhel+=(gcc gcc-c++ make); debian+=(gcc g++ make) ;;
             curl) rhel+=(curl); debian+=(curl) ;;
+            tar) rhel+=(tar); debian+=(tar) ;;
             cmake) rhel+=(cmake); debian+=(cmake) ;;
             swig) rhel+=(swig); debian+=(swig) ;;
             blas) rhel+=(openblas-devel); debian+=(libopenblas-dev) ;;
@@ -228,16 +242,13 @@ install_os_packages() {
     esac
 }
 
-# build 模式创建虚拟环境所需的命令:python3、pip、venv 模块。
+# build 模式的准备动作所需的命令:系统 python3(仅用于脚本兜底) + 下载解压 uv 的 curl/tar。
+# 虚拟环境由 uv 单独拉取 CPython 后创建(见 build.sh 的 create_faiss_venv),不依赖系统 pip/venv。
 require_python_runtime() {
     local -a logical=()
     command -v python3 >/dev/null 2>&1 || logical+=(python3)
-    if ! command -v python3 >/dev/null 2>&1 || ! python3 -m pip --version >/dev/null 2>&1; then
-        logical+=(pip)
-    fi
-    if ! command -v python3 >/dev/null 2>&1 || ! python3 -m venv --help >/dev/null 2>&1; then
-        logical+=(venv)
-    fi
+    command -v curl >/dev/null 2>&1 || logical+=(curl)
+    command -v tar >/dev/null 2>&1 || logical+=(tar)
     (( ${#logical[@]} == 0 )) && return 0
     log "installing missing dependencies: ${logical[*]}"
     install_os_packages "${logical[@]}" || return 30

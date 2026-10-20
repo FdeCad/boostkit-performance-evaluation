@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # faiss 构建脚本:环境采集 + 准备被测软件(安装或校验)。
 #   FUNC_MODE=prebuilt - 镜像内已装好 faiss,只定位并校验版本,不安装
-#   FUNC_MODE=build    - 装依赖 + 分层优先获取(上游官方二进制→三方仓库→源码编译)到任务私有 venv
+#   FUNC_MODE=build    - 装依赖 + 用 uv 固定版本 CPython 建任务私有 venv
+#                        + 分层优先获取(上游官方二进制→三方仓库→源码编译)
 # 暴露给 Framework 的阶段:prepare、install。独立执行时依次运行这两个阶段。
 set -euo pipefail
 
@@ -38,14 +39,58 @@ EOF
 
 # ---------- 阶段:install ----------
 
-# build 模式:创建任务私有 venv,再分层优先获取 faiss(见 common.sh acquire_build_layers)。
-install_faiss_build() {
-    [[ ! -e "${VENV_DIR}" ]] || {
+# 安装上游官方 uv(astral-sh)静态二进制到本任务私有目录,用于拉取固定版本的 CPython。
+install_uv() {
+    local target archive
+    [[ -x "${UV_BIN}" ]] && return 0
+    case "$(normalize_arch "${EXPECTED_ARCH}")" in
+        aarch64) target="aarch64-unknown-linux-gnu" ;;
+        x86_64) target="x86_64-unknown-linux-gnu" ;;
+        *)
+            log "ERROR: unsupported architecture for uv: ${EXPECTED_ARCH}"
+            return 30
+            ;;
+    esac
+    archive="${PERF_WORK_DIR}/uv.tar.gz"
+    log "downloading official uv ${UV_VERSION} (${target})"
+    curl -fsSL --retry 3 --connect-timeout 30 -o "${archive}" \
+        "${UV_RELEASE_BASE}/${UV_VERSION}/uv-${target}.tar.gz" || {
+        log "ERROR: failed to download uv ${UV_VERSION}"
+        return 30
+    }
+    rm -rf -- "${UV_DIR}"
+    mkdir -p "${UV_DIR}" || return 30
+    tar -xzf "${archive}" -C "${UV_DIR}" --strip-components=1 || {
+        log "ERROR: failed to extract uv"
+        return 30
+    }
+    rm -f "${archive}"
+    [[ -x "${UV_BIN}" ]] || {
+        log "ERROR: uv binary is unavailable after install: ${UV_BIN}"
+        return 30
+    }
+    return 0
+}
+
+# 用 uv 拉取固定版本 CPython 并据此创建任务私有 venv。
+# faiss-cpu 的 Linux wheel 是 cpXX 专属标签(1.8.0 只到 cp312),而 ubuntu 26.04 自带 3.14
+# 选不到该 wheel,venv 又无法改变解释器版本,所以必须用 uv 的独立 CPython 构建。
+create_faiss_venv() {
+    local actual_python
+    export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_DIR}"
+    export UV_PYTHON_PREFERENCE=only-managed
+    if [[ -e "${VENV_DIR}" ]]; then
         log "ERROR: virtual environment is not clean: ${VENV_DIR}"
         return 20
+    fi
+    log "installing CPython ${FAISS_PYTHON_VERSION} via uv into ${UV_PYTHON_DIR}"
+    "${UV_BIN}" python install "${FAISS_PYTHON_VERSION}" || {
+        log "ERROR: uv failed to install CPython ${FAISS_PYTHON_VERSION}"
+        return 40
     }
-    log "creating task-private virtual environment ${VENV_DIR}"
-    python3 -m venv "${VENV_DIR}" || {
+    log "creating task-private venv from CPython ${FAISS_PYTHON_VERSION}"
+    # --seed 让 venv 自带 pip/setuptools,后续各层沿用 pip 安装产物。
+    "${UV_BIN}" venv --python "${FAISS_PYTHON_VERSION}" --seed "${VENV_DIR}" || {
         log "ERROR: failed to create the virtual environment"
         return 40
     }
@@ -53,6 +98,19 @@ install_faiss_build() {
         log "ERROR: the virtual environment has no usable pip"
         return 40
     }
+    actual_python="$("${VENV_DIR}/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+    [[ "${actual_python}" == "${FAISS_PYTHON_VERSION}" ]] || {
+        log "ERROR: venv python is ${actual_python}, expected ${FAISS_PYTHON_VERSION}"
+        return 40
+    }
+    log "venv ready with CPython ${actual_python}"
+}
+
+# build 模式:先用 uv 拉固定版本 CPython 建任务私有 venv,再分层优先获取 faiss
+# (见 common.sh acquire_build_layers)。
+install_faiss_build() {
+    install_uv || return $?
+    create_faiss_venv || return $?
     acquire_build_layers \
         fetch_faiss_upstream_binary \
         fetch_faiss_third_party \
@@ -73,10 +131,11 @@ fetch_faiss_upstream_binary() {
 # 没有可用的 conda 运行时(被测环境统一为任务私有 venv),按"渠道不可用即改用等效产物"的规则,
 # 改用等价的预编译 PyPI wheel faiss-cpu(第三方打包的官方 CPU 产物),
 # 强制 --only-binary=:all: 以确保拿到二进制而非现场编译源码包。
+# wheel 有 cpXX ABI 约束,venv 的 CPython 版本已由 create_faiss_venv 按 wheel 标签选定。
 fetch_faiss_third_party() {
     local -a index_args=()
     mapfile -t index_args < <(pip_index_args)
-    log "layer 2: installing the equivalent prebuilt wheel ${FAISS_PACKAGE_SPEC}"
+    log "layer 2: installing the equivalent prebuilt wheel ${FAISS_PACKAGE_SPEC} (python ${FAISS_PYTHON_VERSION})"
     "${VENV_DIR}/bin/pip" install --no-cache-dir --disable-pip-version-check \
         "${index_args[@]}" --only-binary=:all: "${FAISS_PACKAGE_SPEC}"
 }
