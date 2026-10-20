@@ -31,11 +31,11 @@ execution:
 # 判定来源:优先复用上游测试套件(upstream_command),不足时用内部 smoke 补齐。
 # build 模式(FUNC_MODE=build,ubuntu 官方基础镜像内)按分层优先获取 CPython,每层版本需严格等于
 # SOFTWARE_VERSION,不匹配则降级:层1 上游官方二进制(python.org 仅源码,不可用)→
-# 层2 三方仓库包(conda-forge/python、library/python 镜像不可用,改用等效 apt python3)→
-# 层3 官方源码 tarball 编译。
+# 层2 python-build-standalone(astral 维护、uv 同源的 CPython 独立构建,提供 aarch64 预编译包)→
+# 层3 三方仓库包(apt python3.14)→ 层4 官方源码 tarball 编译。
 checks:
   - name: version
-    description: 获取到的 CPython 解释器版本必须等于请求版本(层1/2/3 任一来源均须匹配)
+    description: 获取到的 CPython 解释器版本必须等于请求版本(层1/2/3/4 任一来源均须匹配)
   # 上游测试套件:运行 CPython 官方回归测试的子集(test.regrtest)。
   - name: upstream-test
     description: 运行 CPython 官方回归测试子集(test_math / test_json)

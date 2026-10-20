@@ -2,7 +2,8 @@
 # python (CPython) 构建脚本:环境采集 + 准备被测软件(构建或校验)。
 #   FUNC_MODE=prebuilt - 校验镜像内 python3 版本,不构建
 #   FUNC_MODE=build    - 装依赖 + 分层获取并校验版本:
-#                        层1 上游官方二进制(官方仅源码,不可用)→ 层2 三方仓库包 → 层3 源码编译
+#                        层1 上游官方二进制(官方仅源码,不可用)→ 层2 python-build-standalone
+#                        → 层3 三方仓库包 → 层4 源码编译
 # 暴露给 Framework 的阶段:prepare、install。独立执行时依次运行这两个阶段。
 set -euo pipefail
 
@@ -123,9 +124,9 @@ build_python_from_source() {
 
 # ---------- 分层获取(build 模式) ----------
 # 按优先级(高→低)依次尝试,每一层获取后都必须用 `python3 --version` 校验版本 == SOFTWARE_VERSION,
-# 不匹配或获取失败即降级到下一层;三层都不可行才让 install 失败。
+# 不匹配或获取失败即降级到下一层;四层都不可行才让 install 失败。
 # 渠道依据 config/distribution.yaml 的 python 条目:primary=upstream-release(python.org),
-# channels=conda-forge/python、apt python3、docker library/python。
+# channels=python-build-standalone、apt python3、docker library/python。
 
 # 层1:上游官方二进制 tarball。
 #   python.org 在 Linux 仅分发源码 tarball,无官方预编译二进制 → 该层结构性不可用。
@@ -134,14 +135,95 @@ install_python_layer_upstream_binary() {
     return 1
 }
 
-# 层2:三方仓库中与请求版本一致的 CPython 二进制/包。
+# 层2:python-build-standalone(astral 维护、uv 同源的 CPython 官方独立构建)。
+#   资产名 cpython-<version>+<tag>-<triple>-install_only.tar.gz 版号精确到补丁位,
+#   命中后无需源码编译;tag 是日期流水号,故按最新若干个 release 依次探测。
+PBS_RELEASES_URL="${PBS_RELEASES_URL:-https://github.com/astral-sh/python-build-standalone/releases}"
+PBS_TAG_SCAN="${PBS_TAG_SCAN:-10}"
+
+pbs_platform_triple() {
+    case "$(uname -m)" in
+        aarch64 | arm64) printf 'aarch64-unknown-linux-gnu\n' ;;
+        x86_64 | amd64) printf 'x86_64-unknown-linux-gnu\n' ;;
+        *) return 1 ;;
+    esac
+}
+
+# 最近的若干 release tag:直接解析 releases.atom,不调用 GitHub API,避免匿名限流。
+# atom 不可达时退化为只探测最新 tag(靠 /releases/latest 的重定向取 tag 名)。
+pbs_recent_tags() {
+    local tags latest
+    tags="$(curl -fsSL --retry 3 --connect-timeout 30 -A 'Mozilla/5.0' \
+        "${PBS_RELEASES_URL}/releases.atom" 2>/dev/null |
+        sed -n 's#.*releases/tag/\([^"<]*\)".*#\1#p' || true)"
+    if [[ -n "${tags}" ]]; then
+        printf '%s\n' "${tags}" | head -n "${PBS_TAG_SCAN}" || true
+        return 0
+    fi
+    latest="$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+        "${PBS_RELEASES_URL}/latest" 2>/dev/null || true)"
+    latest="${latest##*/}"
+    [[ -n "${latest}" ]] && printf '%s\n' "${latest}"
+    return 0
+}
+
+# 下载 install_only 资产并解压到私有前缀;版本或标准库模块不符即清理并继续下一个 tag。
+install_python_layer_standalone() {
+    local triple tag asset url candidate version
+    triple="$(pbs_platform_triple)" || {
+        log "layer2: architecture $(uname -m) has no python-build-standalone target"
+        return 1
+    }
+    candidate="${PYTHON_INSTALL_DIR}/bin/python3"
+    for tag in $(pbs_recent_tags); do
+        asset="cpython-${SOFTWARE_VERSION}+${tag}-${triple}-install_only.tar.gz"
+        url="${PBS_RELEASES_URL}/download/${tag}/${asset}"
+        log "layer2: probing python-build-standalone ${tag}"
+        rm -f -- "${PERF_WORK_DIR}/${asset}"
+        if ! curl -fsSL --retry 2 --connect-timeout 30 -A 'Mozilla/5.0' \
+            -o "${PERF_WORK_DIR}/${asset}" "${url}" 2>/dev/null; then
+            continue
+        fi
+        mkdir -p "${PYTHON_INSTALL_DIR}"
+        if ! tar -xzf "${PERF_WORK_DIR}/${asset}" -C "${PYTHON_INSTALL_DIR}" --strip-components=1; then
+            log "layer2: failed to extract ${asset}"
+            rm -rf -- "${PYTHON_INSTALL_DIR}" "${PERF_WORK_DIR}/${asset}"
+            continue
+        fi
+        rm -f -- "${PERF_WORK_DIR}/${asset}"
+        if [[ ! -x "${candidate}" ]]; then
+            log "layer2: ${asset} has no bin/python3"
+            rm -rf -- "${PYTHON_INSTALL_DIR}"
+            continue
+        fi
+        version="$(python_version_of "${candidate}")"
+        if [[ "${version}" != "${SOFTWARE_VERSION}" ]]; then
+            log "layer2: ${asset} reports Python ${version:-unknown}, not ${SOFTWARE_VERSION}"
+            rm -rf -- "${PYTHON_INSTALL_DIR}"
+            continue
+        fi
+        # check 阶段要跑上游回归测试(test.regrtest),产物必须自带 test 包且标准库模块可用。
+        if ! "${candidate}" -c "import ssl, zlib, json, hashlib, test.regrtest" >/dev/null 2>&1; then
+            log "layer2: ${asset} cannot import the standard library modules required by the checks"
+            rm -rf -- "${PYTHON_INSTALL_DIR}"
+            continue
+        fi
+        printf 'PYTHON_BIN=%s\n' "${candidate}" >"${LAYERED_TOOL_FILE}"
+        log "layer2: adopted python-build-standalone ${tag} (${candidate})"
+        return 0
+    done
+    rm -rf -- "${PYTHON_INSTALL_DIR}"
+    return 1
+}
+
+# 层3:三方仓库中与请求版本一致的 CPython 二进制/包。
 #   build 模式无嵌套容器 → library/python 镜像不可用;基础镜像也未内置 conda →
 #   改用等效的发行版仓库包(apt python3.14)。
 install_python_layer_repo_package() {
     local package candidate version
     for package in "python${PYTHON_MM}" "python3"; do
         if ! apt_install "${package}" >/dev/null 2>&1; then
-            log "layer2: distro package ${package} is unavailable"
+            log "layer3: distro package ${package} is unavailable"
             continue
         fi
         candidate="$(command -v "python${PYTHON_MM}" 2>/dev/null || command -v python3 2>/dev/null || true)"
@@ -149,33 +231,38 @@ install_python_layer_repo_package() {
         version="$(python_version_of "${candidate}")"
         if [[ "${version}" == "${SOFTWARE_VERSION}" ]]; then
             printf 'PYTHON_BIN=%s\n' "${candidate}" >"${LAYERED_TOOL_FILE}"
-            log "layer2: adopted distro Python package ${package} (${candidate})"
+            log "layer3: adopted distro Python package ${package} (${candidate})"
             return 0
         fi
-        log "layer2: distro package ${package} provides Python ${version:-unknown}, not ${SOFTWARE_VERSION}"
+        log "layer3: distro package ${package} provides Python ${version:-unknown}, not ${SOFTWARE_VERSION}"
     done
     return 1
 }
 
-# 层3:从官方源码 tarball 编译(最后手段;CPython 官方在 Linux 仅分发源码)。
+# 层4:从官方源码 tarball 编译(最后手段;CPython 官方在 Linux 仅分发源码)。
 install_python_layer_source_build() {
     build_python_from_source
 }
 
-# 分层获取入口:依次尝试三层,任一层成功即返回 0。
+# 分层获取入口:依次尝试四层,任一层成功即返回 0。
 install_python_layered() {
     if install_python_layer_upstream_binary; then
         log "acquired CPython via layer 1 (upstream official binary)"
         return 0
     fi
     log "layer 1 (upstream official binary) unavailable; falling back to layer 2"
-    if install_python_layer_repo_package; then
-        log "acquired CPython via layer 2 (third-party repo package)"
+    if install_python_layer_standalone; then
+        log "acquired CPython via layer 2 (python-build-standalone)"
         return 0
     fi
-    log "layer 2 (third-party repo package) unavailable; falling back to layer 3"
+    log "layer 2 (python-build-standalone) unavailable; falling back to layer 3"
+    if install_python_layer_repo_package; then
+        log "acquired CPython via layer 3 (third-party repo package)"
+        return 0
+    fi
+    log "layer 3 (third-party repo package) unavailable; falling back to layer 4"
     if install_python_layer_source_build; then
-        log "acquired CPython via layer 3 (source build)"
+        log "acquired CPython via layer 4 (source build)"
         return 0
     fi
     log "ERROR: no CPython ${SOFTWARE_VERSION} acquisition layer succeeded"

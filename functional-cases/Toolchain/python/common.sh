@@ -24,7 +24,7 @@ PYTHON_SOURCE_DIR=""
 PYTHON_INSTALL_DIR=""
 PYTHON_BIN=""
 PYTHON_MM=""
-# build 模式分层获取选定的工具路径标记:install 阶段若 layer2 采用发行版仓库包的 python,
+# build 模式分层获取选定的工具路径标记:install 阶段任一层替换了默认的私有前缀解释器,
 # 会把 PYTHON_BIN 写入此文件,check 阶段据此复用同一层产物。
 LAYERED_TOOL_FILE=""
 STANDALONE_OWNS_WORK_DIR=0

@@ -232,7 +232,7 @@ software:
   python:
     category: Toolchain
     primary: {type: upstream-release, ref: "https://www.python.org/downloads/"}
-    channels: {pypi: null, conda: "conda-forge/python", apt: python3, docker: "library/python", spack: python}
+    channels: {pypi: null, standalone: "astral-sh/python-build-standalone", conda: "conda-forge/python", apt: python3, docker: "library/python", spack: python}
     arm64_binary: yes
     auto_latest: partial
-    note: "解释器无 pip 渠道;library/python 镜像含 arm64v8,conda-forge 跟最新"
+    note: "解释器无 pip 渠道;功能测试优先用 python-build-standalone 的 aarch64 预编译包(版本精确到补丁位、免源码编译),library/python 镜像含 arm64v8"
