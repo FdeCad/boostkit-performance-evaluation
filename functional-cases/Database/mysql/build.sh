@@ -162,13 +162,19 @@ mysql_reset_build_tree() {
 
 # 层 1:上游官方二进制(Linux Generic 预编译包),版本必须严格等于请求版本。
 mysql_layer_upstream_binary() {
-    local archive_path actual
+    local archive_path actual missing
     mysql_archive_descriptor || return 1
     archive_path="$(fetch_mysql_archive)" || return 1
     extract_mysql_archive "${archive_path}" || { mysql_reset_build_tree; return 1; }
     [[ -x "${MYSQLD_BIN}" && -x "${MYSQL_BIN}" ]] || { mysql_reset_build_tree; return 1; }
-    if ldd "${MYSQLD_BIN}" 2>&1 | grep -Eq 'libaio[^[:space:]]*[[:space:]]+=>[[:space:]]+not found'; then
-        log "libaio runtime is missing for the official binary"
+    # 官方二进制对运行库是硬依赖(缺库时进程连加载都过不去),所以把 ldd 里所有
+    # not found 的行都打出来,便于一次看清缺了哪些库,而不是只盯 libaio 一个。
+    missing="$(ldd "${MYSQLD_BIN}" 2>&1 | grep 'not found' || true)"
+    if [[ -n "${missing}" ]]; then
+        log "official binary misses runtime libraries:"
+        while IFS= read -r line; do
+            log "  ${line}"
+        done <<<"${missing}"
         mysql_reset_build_tree
         return 1
     fi

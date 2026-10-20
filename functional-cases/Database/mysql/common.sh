@@ -208,12 +208,38 @@ apt_install() {
     fi
 }
 
+# Ubuntu 24.04+ 的 libaio1t64 只装出 libaio.so.1t64*,而 MySQL 官方二进制硬依赖
+# libaio.so.1,名字对不上时 ldd 永远是 "libaio.so.1 => not found"。缺 libaio.so.1 时
+# 在库目录里补一个 compat 软链并刷新缓存(容器内操作,随容器一起销毁)。
+ensure_libaio_soname_compat() {
+    local lib_dir real candidate
+    for lib_dir in "/usr/lib/$(uname -m)-linux-gnu" /usr/lib64 "/lib/$(uname -m)-linux-gnu" /usr/lib; do
+        [[ -d "${lib_dir}" ]] || continue
+        [[ -e "${lib_dir}/libaio.so.1" ]] && return 0
+        for real in "${lib_dir}"/libaio.so.1t64*; do
+            [[ -e "${real}" ]] || continue
+            candidate="$(basename "${real}")"
+            if [[ "$(id -u)" -eq 0 ]]; then
+                ln -sf "${candidate}" "${lib_dir}/libaio.so.1" || continue
+                ldconfig || true
+            else
+                sudo -n ln -sf "${candidate}" "${lib_dir}/libaio.so.1" || continue
+                sudo -n ldconfig || true
+            fi
+            log "linked ${lib_dir}/libaio.so.1 -> ${candidate}"
+            return 0
+        done
+    done
+    return 1
+}
+
 # libaio 运行库在不同发行版包名不同,逐个候选重试。
 install_debian_libaio() {
     local candidate
     for candidate in libaio1t64 libaio1 libaio-dev; do
         if apt_install "${candidate}" >/dev/null 2>&1; then
             log "installed ${candidate}"
+            ensure_libaio_soname_compat || true
             return 0
         fi
     done
@@ -242,6 +268,8 @@ install_os_packages() {
                 debian+=(libssl-dev libncurses-dev bison libbz2-dev libcurl4-openssl-dev pkg-config)
                 ;;
             libaio) rhel+=(libaio); want_debian_libaio=1 ;;
+            # 通用二进制里的 mysqld 还链了 libnuma。
+            numa) rhel+=(numactl-libs); debian+=(libnuma1) ;;
             *)
                 log "ERROR: unknown logical package: ${logical}"
                 return 30
@@ -280,9 +308,16 @@ require_build_commands() {
     if ! ldconfig -p 2>/dev/null | grep -q 'libaio\.so'; then
         logical+=(libaio)
     fi
-    (( ${#logical[@]} == 0 )) && return 0
-    log "installing missing dependencies: ${logical[*]}"
-    install_os_packages "${logical[@]}" || return 30
+    if ! ldconfig -p 2>/dev/null | grep -q 'libnuma\.so'; then
+        logical+=(numa)
+    fi
+    if (( ${#logical[@]} > 0 )); then
+        log "installing missing dependencies: ${logical[*]}"
+        install_os_packages "${logical[@]}" || return 30
+    fi
+    # libnuma 装好后不用特殊处理,libaio 则要保证官方二进制找得到 libaio.so.1。
+    ensure_libaio_soname_compat || log "WARN: could not provide libaio.so.1 for the official binary"
+    return 0
 }
 
 json_escape() {
