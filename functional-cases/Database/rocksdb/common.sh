@@ -258,6 +258,12 @@ install_os_packages() {
                 rhel+=(gflags-devel)
                 debian+=(libgflags-dev)
                 ;;
+            # aarch64 上 db_bench 会 NEEDED libatomic(128 位原子操作运行时),
+            # 预构建镜像可能只装了主库,运行时报 "libatomic.so.1: cannot open shared object file"。
+            rocksdb-atomic)
+                rhel+=(libatomic)
+                debian+=(libatomic1)
+                ;;
             # 压缩库开发包:RocksDB 会自动探测,缺失也能编译(功能降级)。
             rocksdb-libs)
                 rhel+=(snappy-devel lz4-devel libzstd-devel zlib-devel bzip2-devel)
@@ -293,6 +299,29 @@ install_os_packages() {
 ensure_rocksdb_runtime_deps() {
     install_os_packages rocksdb-gflags || return 30
     install_os_packages rocksdb-libs || log "WARN: optional compression dev packages unavailable"
+}
+
+# 按 db_bench 的动态链接实况补齐缺失的运行时库。
+# 预构建镜像可能只打了 rocksdb 主库,像 libatomic 这种间接依赖会漏,导致 db_bench 直接加载失败。
+ensure_db_bench_runtime_libs() {
+    local line missing
+    [[ -n "${ROCKSDB_DB_BENCH_BIN}" && -x "${ROCKSDB_DB_BENCH_BIN}" ]] || return 0
+    command -v ldd >/dev/null 2>&1 || return 0
+    while IFS= read -r line; do
+        [[ "${line}" == *"not found"* ]] || continue
+        missing="${line%%[[:space:]]=>*}"
+        missing="${missing//[[:space:]]/}"
+        case "${missing}" in
+            libatomic.so*)
+                log "installing libatomic runtime required by db_bench"
+                install_os_packages rocksdb-atomic || return 30
+                ;;
+            *)
+                log "WARN: unresolved shared library for db_bench: ${missing}"
+                ;;
+        esac
+    done < <(ldd "${ROCKSDB_DB_BENCH_BIN}" 2>/dev/null || true)
+    return 0
 }
 
 require_build_commands() {

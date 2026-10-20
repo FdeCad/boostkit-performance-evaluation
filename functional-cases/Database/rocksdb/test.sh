@@ -220,6 +220,8 @@ func_check() {
     fi
 
     # 2) 上游 db_bench 工具
+    # 预构建镜像可能漏打 db_bench 的间接运行时库(如 libatomic),先按实际链接情况补齐。
+    ensure_db_bench_runtime_libs || log "WARN: could not satisfy db_bench runtime dependencies"
     if run_upstream_test >"${RESULTS_DIR}/upstream_test.log" 2>&1; then
         upstream_status="passed"
         upstream_detail="upstream db_bench fillrandom/readrandom ok (num=${ROCKSDB_BENCH_NUM})"
