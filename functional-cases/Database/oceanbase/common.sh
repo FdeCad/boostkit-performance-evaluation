@@ -40,6 +40,11 @@ STANDALONE_KEEP_WORK_DIR=0
 # 预构建镜像内 observer 的启动脚本:由 oceanbase-ce rpm 安装,镜像 CMD 亦调用它。
 OB_IMAGE_SERVICE_SCRIPT="/home/admin/oceanbase/profile/oceanbase-service.sh"
 
+# Ubuntu/Debian 侧 obd 的上游官方 rpm 源,以及解包后的任务私有安装根目录(在
+# configure_runtime_paths 中赋值)。obd 只以 rpm 分发(PyPI 上没有对应包)。
+OBD_RPM_MIRROR_BASE="https://mirrors.oceanbase.com/community/stable/el/8"
+OBD_ROOT=""
+
 log() { printf '[oceanbase-func] %s\n' "$*"; }
 
 normalize_arch() {
@@ -134,10 +139,11 @@ configure_runtime_paths() {
 
     OB_DEPLOY_HOME="${PERF_WORK_DIR}/oceanbase-demo"
     OBD_HOME="${PERF_WORK_DIR}/obd-meta"
+    OBD_ROOT="${PERF_WORK_DIR}/obd-root"
 
     export SOFTWARE_NAME CATEGORY SOFTWARE_VERSION EXPECTED_ARCH FUNC_OS FUNC_HARDWARE FUNC_MODE
     export PERF_RUN_ID PERF_WORK_DIR RESULTS_DIR PERF_ACTUAL_VERSION_FILE TMPDIR
-    export OB_HOST OB_PORT OB_RPC_PORT OB_USER OB_PASSWORD OB_DB OBD_HOME
+    export OB_HOST OB_PORT OB_RPC_PORT OB_USER OB_PASSWORD OB_DB OBD_HOME OBD_ROOT
 }
 
 initialize_runtime() {
@@ -248,28 +254,69 @@ write_oceanbase_repo() {
     fi
 }
 
-# Ubuntu/Debian 无法用 rpm 源,改由 pip 安装官方 oceanbase-deploy(obd)。
-# 系统 Python 受 PEP 668 保护(externally-managed-environment),直接 pip3 install 会被
-# 拒绝;改在任务私有 venv 中安装部署器,不动系统 Python 也不装到系统路径。
+# obd 只以 rpm 分发,上游没有 PyPI 包(oceanbase-deploy/ob-deploy 均无发布),因此
+# Ubuntu/Debian 侧改为取官网 el8 源里的上游 rpm,解包到任务私有目录后直接运行:
+# obd 是自带解释器的单文件程序,不依赖系统 Python,天然绕开 PEP 668。
+# 私有目录通过 OBD_INSTALL_PRE 指认(obd 的 tool.py 用它推导安装路径 /usr/obd)。
+activate_private_obd() {
+    [[ -x "${OBD_ROOT}/usr/bin/obd" ]] || return 1
+    export OBD_INSTALL_PRE="${OBD_ROOT}"
+    export PATH="${OBD_ROOT}/usr/bin:${PATH}"
+    return 0
+}
+
+# 取上游 el8 源目录索引里版本最高的 ob-deploy rpm 文件名(形如 ob-deploy-4.7.0-3.el8.aarch64.rpm)。
+# 索引取不到或无匹配时输出为空并返回 0,由调用方判定为空即报错(避免 set -e 静默退出)。
+obd_rpm_filename() {
+    local arch="$1" listing
+    listing="$(curl -fsSL --retry 3 --connect-timeout 30 \
+        "${OBD_RPM_MIRROR_BASE}/${arch}/" 2>/dev/null || true)"
+    printf '%s\n' "${listing}" |
+        grep -oE "ob-deploy-[0-9][0-9A-Za-z._-]*\.el8\.${arch}\.rpm" |
+        sort -V | tail -n 1 || true
+}
+
 install_obd_debian() {
-    local venv="${PERF_WORK_DIR}/obd-venv"
-    if [[ -x "${venv}/bin/obd" ]]; then
-        export PATH="${venv}/bin:${PATH}"
+    local arch name url rpm_file executer
+    if activate_private_obd; then
         return 0
     fi
-    log "installing obd (oceanbase-deploy) into the task-private venv ${venv}"
-    if ! python3 -m venv "${venv}" >/dev/null 2>&1; then
-        # Debian/Ubuntu 把 venv 模块单独打包在 python3-venv 中,默认不随 python3 安装。
-        rm -rf -- "${venv}"
-        apt_install python3-venv || return 30
-        python3 -m venv "${venv}" || return 30
-    fi
-    "${venv}/bin/pip" install --no-input oceanbase-deploy || return 30
-    export PATH="${venv}/bin:${PATH}"
-    command -v obd >/dev/null 2>&1 || {
-        log "ERROR: obd is unusable after installing oceanbase-deploy into ${venv}"
+    apt_install rpm cpio || return 30
+    arch="$(uname -m)"
+    name="$(obd_rpm_filename "${arch}")"
+    [[ -n "${name}" ]] || {
+        log "ERROR: no ob-deploy rpm found for ${arch} on ${OBD_RPM_MIRROR_BASE}"
         return 30
     }
+    url="${OBD_RPM_MIRROR_BASE}/${arch}/${name}"
+    rpm_file="${PERF_WORK_DIR}/${name}"
+    log "installing obd from the upstream rpm into ${OBD_ROOT}"
+    curl -fsSL --retry 3 --connect-timeout 30 -o "${rpm_file}" "${url}" || {
+        log "ERROR: failed to download ${url}"
+        return 30
+    }
+    rm -rf -- "${OBD_ROOT}"
+    mkdir -p "${OBD_ROOT}" || return 30
+    # rpm 内是绝对路径(usr/bin/obd、usr/obd/*),cpio 会去掉前导斜杠,正好落到私有根下。
+    (cd "${OBD_ROOT}" && rpm2cpio "${rpm_file}" | cpio -idm --quiet --no-absolute-filenames) || {
+        log "ERROR: failed to unpack ${name} into ${OBD_ROOT}"
+        return 30
+    }
+    rm -f "${rpm_file}"
+    [[ -f "${OBD_ROOT}/usr/bin/obd" ]] || {
+        log "ERROR: ${name} does not provide usr/bin/obd"
+        return 30
+    }
+    chmod +x "${OBD_ROOT}/usr/bin/obd"
+    executer="${OBD_ROOT}/usr/obd/lib/executer/executer27/bin/executer"
+    if [[ -f "${executer}" ]]; then
+        chmod +x "${executer}"
+    fi
+    activate_private_obd || {
+        log "ERROR: obd is unusable after unpacking ${name} into ${OBD_ROOT}"
+        return 30
+    }
+    return 0
 }
 
 install_oceanbase_dependencies() {
@@ -306,6 +353,8 @@ install_oceanbase_dependencies() {
             dnf_install "${packages[@]}" || return 30
             ;;
         debian)
+            # observer 是 el8 二进制:libaio 是 rpm 里声明的硬依赖,libnuma 与上游镜像的预装保持一致。
+            packages+=(libaio1t64 libnuma1)
             (( ${#packages[@]} > 0 )) && { apt_install "${packages[@]}" || return 30; }
             if [[ "${FUNC_MODE}" != "prebuilt" ]] && ! command -v obd >/dev/null 2>&1; then
                 install_obd_debian || {

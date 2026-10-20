@@ -140,10 +140,8 @@ func_check() {
 func_cleanup() {
     initialize_runtime || return $?
     export OBD_HOME
-    # build 模式下 obd 装在任务私有 venv 中,清理时需把它加回 PATH 才能销毁集群。
-    if [[ -x "${PERF_WORK_DIR}/obd-venv/bin/obd" ]]; then
-        export PATH="${PERF_WORK_DIR}/obd-venv/bin:${PATH}"
-    fi
+    # build 模式下 obd 解包在任务私有目录,清理时需重新激活才能销毁集群。
+    activate_private_obd || true
     if command -v obd >/dev/null 2>&1; then
         obd cluster destroy demo -f >/dev/null 2>&1 || true
     fi
