@@ -32,11 +32,16 @@ checks:
   - name: version
     description: x265 --version 的版本号必须等于请求版本
   # 上游编码质量指标:x265 自带 PSNR/SSIM 分析(--psnr --ssim),需报告 SSIM/PSNR Mean。
-  - name: upstream-test
-    description: 用 x265 自带的 PSNR/SSIM 分析编码一段裸 YUV
+  - name: quality-metrics
+    description: 编码 3 帧，校验 PSNR 为有限正数、SSIM 为 [0,1] 内有限数
     upstream_command: x265 --psnr --ssim --frames 3 --input-res 64x64 -o metrics.265 input.yuv
   - name: encode-smoke
     description: 生成裸 YUV 并用 x265 CLI 编码成码流,校验码流含 NAL 起始码
+
+  - name: decoder-dependencies
+    description: 按需安装 FFmpeg，ffmpeg 和 ffprobe 必须可用，安装失败不跳过
+  - name: decode-check
+    description: 完整解码无错误，HEVC 64x64，3 帧，I420 输出 18432 字节
 
 outputs:
   functional_result:

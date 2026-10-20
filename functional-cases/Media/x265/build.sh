@@ -64,11 +64,13 @@ build_x265_from_source() {
     archive_name="x265_${SOFTWARE_VERSION}.tar.gz"
     archive_path="${PERF_WORK_DIR}/${archive_name}"
     log "downloading official x265 source archive ${archive_name}"
-    wget -O "${archive_path}" "${X265_ARCHIVE_BASE_URL}/${archive_name}" || {
+    curl -fSL --connect-timeout 30 --retry 3 -o "${archive_path}" \
+        "${X265_ARCHIVE_BASE_URL}/${archive_name}" || {
         log "ERROR: failed to download ${X265_ARCHIVE_BASE_URL}/${archive_name}"
         return 30
     }
-    (cd "${PERF_WORK_DIR}" && tar -zxf "${archive_path}") || {
+    mkdir -p "${SOURCE_DIR}" || return 30
+    tar -xzf "${archive_path}" -C "${SOURCE_DIR}" --strip-components=1 || {
         log "ERROR: failed to extract ${archive_path}"
         return 30
     }
@@ -80,16 +82,23 @@ build_x265_from_source() {
     log "building and installing x265 into ${INSTALL_DIR}"
     mkdir -p "${BUILD_DIR}" "${INSTALL_DIR}"
     (
-        cd "${BUILD_DIR}"
-        cmake -S ../source -DCMAKE_BUILD_TYPE=Release \
+        cmake -S "${SOURCE_DIR}/source" -B "${BUILD_DIR}" \
+            -DCMAKE_BUILD_TYPE=Release \
             -DENABLE_PIC=ON \
+            -DENABLE_ASSEMBLY=ON \
+            -DCMAKE_VERBOSE_MAKEFILE=ON \
+            -DCMAKE_C_FLAGS=-O3 \
+            -DCMAKE_CXX_FLAGS=-O3 \
+            -DHIGH_BIT_DEPTH=OFF \
+            -DENABLE_TESTS=ON \
             -DENABLE_SHARED=ON \
-            -DENABLE_LIBNUMA=off \
+            -DENABLE_LIBNUMA=OFF \
             -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}" || {
             log "ERROR: x265 cmake configure failed"
             exit 40
         }
-        make -j"$(nproc)" && make install || {
+        cmake --build "${BUILD_DIR}" -j"$(nproc)" &&
+            cmake --install "${BUILD_DIR}" || {
             log "ERROR: x265 make or install failed"
             exit 40
         }

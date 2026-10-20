@@ -15,8 +15,8 @@ PERF_WORK_DIR="${PERF_WORK_DIR:-}"
 RESULTS_DIR="${RESULTS_DIR:-}"
 PERF_ACTUAL_VERSION_FILE="${PERF_ACTUAL_VERSION_FILE:-}"
 
-# 上游官方源码归档(bitbucket multicoreware/x265_git downloads)。
-X265_ARCHIVE_BASE_URL="${X265_ARCHIVE_BASE_URL:-https://bitbucket.org/multicoreware/x265_git/downloads}"
+# 与参考 Dockerfile 一致，使用 GitHub Release 的源码归档。
+X265_ARCHIVE_BASE_URL="${X265_ARCHIVE_BASE_URL:-https://github.com/Multicorewareinc/x265/releases/download/${SOFTWARE_VERSION}}"
 # prebuilt 模式下镜像若已内置源码树(含 source/),可用 X265_SOURCE_DIR(指到 source 的父目录)覆盖。
 X265_SOURCE_DIR="${X265_SOURCE_DIR:-}"
 
@@ -106,6 +106,11 @@ configure_runtime_paths() {
         X265_BIN="${path}"
     else
         X265_BIN="${INSTALL_DIR}/bin/x265"
+        # 每个工作流阶段都是新进程，安装和检查阶段都需要定位私有动态库。
+        case ":${LD_LIBRARY_PATH:-}:" in
+            *":${INSTALL_DIR}/lib:"*) ;;
+            *) export LD_LIBRARY_PATH="${INSTALL_DIR}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" ;;
+        esac
     fi
 
     export SOFTWARE_NAME CATEGORY SOFTWARE_VERSION EXPECTED_ARCH FUNC_OS FUNC_HARDWARE FUNC_MODE
@@ -154,10 +159,14 @@ install_os_packages() {
             coreutils) rhel+=(coreutils); debian+=(coreutils) ;;
             make) rhel+=(make); debian+=(make) ;;
             cmake) rhel+=(cmake); debian+=(cmake) ;;
-            wget) rhel+=(wget); debian+=(wget) ;;
+            curl) rhel+=(curl); debian+=(curl) ;;
+            ca-certificates) rhel+=(ca-certificates); debian+=(ca-certificates) ;;
+            gzip) rhel+=(gzip); debian+=(gzip) ;;
+            git) rhel+=(git); debian+=(git) ;;
             tar) rhel+=(tar); debian+=(tar) ;;
             build-tools) rhel+=(gcc gcc-c++); debian+=(build-essential) ;;
             nasm) rhel+=(nasm); debian+=(nasm) ;;
+            ffmpeg) rhel+=(ffmpeg); debian+=(ffmpeg) ;;
             *)
                 log "ERROR: unknown logical package: ${logical}"
                 return 30
@@ -188,7 +197,10 @@ require_build_commands() {
     command -v python3 >/dev/null 2>&1 || logical+=(python3)
     command -v cmake >/dev/null 2>&1 || logical+=(cmake)
     command -v make >/dev/null 2>&1 || logical+=(make)
-    command -v wget >/dev/null 2>&1 || logical+=(wget)
+    command -v curl >/dev/null 2>&1 || logical+=(curl ca-certificates)
+    [[ -s /etc/ssl/certs/ca-certificates.crt || -s /etc/pki/tls/certs/ca-bundle.crt ]] || logical+=(ca-certificates)
+    command -v gzip >/dev/null 2>&1 || logical+=(gzip)
+    command -v git >/dev/null 2>&1 || logical+=(git)
     command -v tar >/dev/null 2>&1 || logical+=(tar)
     if ! command -v cc >/dev/null 2>&1 || ! command -v c++ >/dev/null 2>&1; then
         logical+=(build-tools)
