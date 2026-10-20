@@ -102,46 +102,50 @@ rocksdb_dir_has_lib() {
     return 1
 }
 
-# 在若干候选目录中定位 librocksdb 库目录。
+# 可能存放 librocksdb 的目录:显式指定 → db_bench 同级 lib → 镜像的 LIBRARY_PATH →
+# 常规库目录 → 自定义 prefix。镜像常把库装到非标准 prefix 并用 LIBRARY_PATH 暴露给链接器,
+# 此时 g++ 能链上、运行时动态加载器却找不到,所以两边都以这份列表为准。
+rocksdb_candidate_lib_dirs() {
+    [[ -n "${ROCKSDB_LIB_DIR:-}" ]] && printf '%s\n' "${ROCKSDB_LIB_DIR}"
+    if [[ -n "${ROCKSDB_DB_BENCH_BIN}" ]]; then
+        printf '%s\n' "$(dirname "${ROCKSDB_DB_BENCH_BIN}")/../lib"
+        printf '%s\n' "$(dirname "${ROCKSDB_DB_BENCH_BIN}")/../lib64"
+    fi
+    [[ -z "${LIBRARY_PATH:-}" ]] || tr ':' '\n' <<<"${LIBRARY_PATH}"
+    printf '%s\n' \
+        "/usr/local/lib" "/usr/local/lib64" \
+        "/usr/lib" "/usr/lib64" "/lib" "/lib64" \
+        "/usr/lib/$(uname -m)-linux-gnu" \
+        "/opt/rocksdb/lib" "/opt/rocksdb/lib64" \
+        "${PERF_WORK_DIR}/rocksdb-source" "${PERF_WORK_DIR}/rocksdb-conda/lib"
+}
+
+# 在候选目录中定位 librocksdb 库目录;都不命中时按文件名在常见 prefix 下浅层搜索。
 find_rocksdb_lib_dir() {
     local candidate
-    local -a candidates=(
-        "${ROCKSDB_LIB_DIR:-}"
-        "/usr/local/lib"
-        "/usr/local/lib64"
-        "/usr/lib"
-        "/usr/lib64"
-        "/usr/lib/$(uname -m)-linux-gnu"
-        "${PERF_WORK_DIR}/rocksdb-source"
-    )
-    for candidate in "${candidates[@]}"; do
+    while IFS= read -r candidate; do
         if rocksdb_dir_has_lib "${candidate}"; then
-            printf '%s\n' "${candidate}"
+            (cd "${candidate}" && pwd)
             return 0
         fi
-    done
-    return 1
+    done < <(rocksdb_candidate_lib_dirs)
+    candidate="$(find /usr/local /usr /opt /lib /lib64 -maxdepth 4 \
+        \( -name 'librocksdb.a' -o -name 'librocksdb.so' \) -print -quit 2>/dev/null || true)"
+    [[ -n "${candidate}" ]] || return 1
+    dirname "${candidate}"
 }
 
 # db_bench 可能依赖非标准路径下的共享库(如镜像里的 librocksdb.so.N),运行前需补进
 # LD_LIBRARY_PATH,否则报 "error while loading shared libraries: librocksdb.so.N"。
 rocksdb_runtime_lib_path() {
     local dir out=""
-    local -a dirs=(
-        "${ROCKSDB_LIB_DIR:-}"
-        "/usr/local/lib"
-        "/usr/local/lib64"
-        "/usr/lib"
-        "/usr/lib64"
-        "/usr/lib/$(uname -m)-linux-gnu"
-    )
-    if [[ -n "${ROCKSDB_DB_BENCH_BIN}" ]]; then
-        dirs=("$(dirname "${ROCKSDB_DB_BENCH_BIN}")/../lib" "${dirs[@]}")
-    fi
-    for dir in "${dirs[@]}"; do
+    while IFS= read -r dir; do
         [[ -n "${dir}" && -d "${dir}" ]] || continue
+        case "${out}" in
+            *"${dir}:") continue ;;
+        esac
         out+="${dir}:"
-    done
+    done < <(rocksdb_candidate_lib_dirs)
     printf '%s\n' "${out}"
 }
 

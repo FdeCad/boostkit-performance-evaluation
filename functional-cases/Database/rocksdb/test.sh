@@ -38,6 +38,16 @@ run_upstream_test() {
     rm -rf -- "${data_dir}"
 }
 
+# db_bench 启动失败时把动态库解析情况记进日志,便于区分“镜像缺库”与“库不在加载路径”。
+log_db_bench_diagnostics() {
+    {
+        printf -- '--- ldd %s ---\n' "${ROCKSDB_DB_BENCH_BIN}"
+        LD_LIBRARY_PATH="$(rocksdb_runtime_lib_path)" ldd "${ROCKSDB_DB_BENCH_BIN}" 2>&1 || true
+        printf -- '--- librocksdb* found on disk ---\n'
+        find /usr /usr/local /opt /lib /lib64 -maxdepth 5 -name 'librocksdb*' -print 2>/dev/null | head -n 20 || true
+    } >>"${RESULTS_DIR}/upstream_test.log"
+}
+
 # 基础功能 smoke:编译并运行一个最小的 C++ 程序,验证打开/写入/读取/重开。
 # rocksdb 11.x 起头文件要求 C++20,且 DB::Open 只保留 std::unique_ptr<DB> 重载,
 # 故按 version.h 的 ROCKSDB_MAJOR 分支选择 API。
@@ -130,19 +140,27 @@ run_api_smoke() {
     local src="${work}/smoke.cc"
     local bin="${work}/smoke"
     local db_dir="${work}/smoke_db"
+    local lib_path
+    lib_path="$(rocksdb_runtime_lib_path)"
     rm -rf -- "${work}"
     mkdir -p "${work}"
     api_smoke_source >"${src}"
     : >"${RESULTS_DIR}/api_smoke.log"
     compile_api_smoke "${src}" "${bin}" "${RESULTS_DIR}/api_smoke.log" || return $?
-    "${bin}" "${db_dir}" || return $?
+    # 静态链接时不需要,但镜像只提供动态库时(常见)必须补 LD_LIBRARY_PATH。
+    LD_LIBRARY_PATH="${lib_path}${LD_LIBRARY_PATH:-}" "${bin}" "${db_dir}" || return $?
 }
 
-# api-smoke 需要就地编译;prebuilt 模式的软件镜像通常不含编译器,缺失时按发行版补装。
-ensure_smoke_compiler() {
-    command -v g++ >/dev/null 2>&1 && return 0
-    log "g++ not found; installing build tools for the API smoke test"
-    install_os_packages build-tools || return 30
+# api-smoke 需要就地编译并链接 rocksdb 及其可选压缩库;prebuilt 模式的软件镜像通常只装了
+# 运行时库、没有编译器和 -devel 包,缺失时按发行版补装。
+ensure_smoke_toolchain() {
+    if ! command -v g++ >/dev/null 2>&1; then
+        log "g++ not found; installing build tools for the API smoke test"
+        install_os_packages build-tools || return 30
+    fi
+    if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
+        ensure_rocksdb_runtime_deps || return $?
+    fi
     command -v g++ >/dev/null 2>&1
 }
 
@@ -207,10 +225,11 @@ func_check() {
         upstream_detail="upstream db_bench fillrandom/readrandom ok (num=${ROCKSDB_BENCH_NUM})"
     else
         upstream_detail="upstream db_bench smoke failed; see upstream_test.log"
+        log_db_bench_diagnostics
     fi
 
     # 3) 自编译 API 烟测
-    if ! ensure_smoke_compiler; then
+    if ! ensure_smoke_toolchain; then
         smoke_detail="C++ compiler is unavailable for the API smoke test"
     elif run_api_smoke >"${RESULTS_DIR}/api_smoke.log" 2>&1; then
         smoke_status="passed"
