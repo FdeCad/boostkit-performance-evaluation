@@ -12,12 +12,14 @@ source "${SCRIPT_DIR}/common.sh"
 # ---------- 阶段:check ----------
 
 # 上游 db_bench:先写满,再只读遍历,验证官方工具可正常读写。
+# db_bench 可能依赖镜像内非标准路径的共享库,统一用 LD_LIBRARY_PATH 补全。
 run_upstream_test() {
-    local data_dir="${PERF_WORK_DIR}/db_bench_data"
+    local data_dir="${PERF_WORK_DIR}/db_bench_data" lib_path
+    lib_path="$(rocksdb_runtime_lib_path)"
     rm -rf -- "${data_dir}"
     mkdir -p "${data_dir}"
     log "db_bench fillrandom --num=${ROCKSDB_BENCH_NUM}"
-    "${ROCKSDB_DB_BENCH_BIN}" \
+    LD_LIBRARY_PATH="${lib_path}${LD_LIBRARY_PATH:-}" "${ROCKSDB_DB_BENCH_BIN}" \
         --db="${data_dir}" \
         --benchmarks=fillrandom \
         --num="${ROCKSDB_BENCH_NUM}" \
@@ -25,7 +27,7 @@ run_upstream_test() {
         --threads=1 \
         --statistics=0 || return $?
     log "db_bench readrandom (read-only smoke)"
-    "${ROCKSDB_DB_BENCH_BIN}" \
+    LD_LIBRARY_PATH="${lib_path}${LD_LIBRARY_PATH:-}" "${ROCKSDB_DB_BENCH_BIN}" \
         --db="${data_dir}" \
         --benchmarks=readrandom,readmissing \
         --num="${ROCKSDB_BENCH_NUM}" \
@@ -37,17 +39,38 @@ run_upstream_test() {
 }
 
 # 基础功能 smoke:编译并运行一个最小的 C++ 程序,验证打开/写入/读取/重开。
+# rocksdb 11.x 起头文件要求 C++20,且 DB::Open 只保留 std::unique_ptr<DB> 重载,
+# 故按 version.h 的 ROCKSDB_MAJOR 分支选择 API。
 api_smoke_source() {
     cat <<'CPP'
 #include <rocksdb/db.h>
 #include <rocksdb/options.h>
+#include <rocksdb/version.h>
 #include <iostream>
+#include <memory>
 #include <string>
 
 int main(int argc, char** argv) {
     const std::string path = (argc > 1) ? argv[1] : "./rocksdb_smoke_db";
     rocksdb::Options options;
     options.create_if_missing = true;
+#if ROCKSDB_MAJOR >= 11
+    std::unique_ptr<rocksdb::DB> db;
+    rocksdb::Status status = rocksdb::DB::Open(options, path, &db);
+    if (!status.ok()) { std::cerr << "open: " << status.ToString() << "\n"; return 1; }
+    status = db->Put(rocksdb::WriteOptions(), "func_key", "func_value");
+    if (!status.ok()) { std::cerr << "put: " << status.ToString() << "\n"; return 1; }
+    std::string value;
+    status = db->Get(rocksdb::ReadOptions(), "func_key", &value);
+    if (!status.ok() || value != "func_value") { std::cerr << "get mismatch\n"; return 1; }
+    db.reset();
+    status = rocksdb::DB::Open(options, path, &db);
+    if (!status.ok()) { std::cerr << "reopen: " << status.ToString() << "\n"; return 1; }
+    value.clear();
+    status = db->Get(rocksdb::ReadOptions(), "func_key", &value);
+    if (!status.ok() || value != "func_value") { std::cerr << "reopen get mismatch\n"; return 1; }
+    db.reset();
+#else
     rocksdb::DB* db = nullptr;
     rocksdb::Status status = rocksdb::DB::Open(options, path, &db);
     if (!status.ok()) { std::cerr << "open: " << status.ToString() << "\n"; return 1; }
@@ -63,24 +86,39 @@ int main(int argc, char** argv) {
     status = db->Get(rocksdb::ReadOptions(), "func_key", &value);
     if (!status.ok() || value != "func_value") { std::cerr << "reopen get mismatch\n"; return 1; }
     delete db;
+#endif
     std::cout << "api-smoke ok\n";
     return 0;
 }
 CPP
 }
 
+# 头文件要求的 C++ 标准:11.x 起必须 C++20。
+rocksdb_cxx_std() {
+    local version major
+    version="$(rocksdb_version_from_header "${ROCKSDB_INCLUDE_DIR}/rocksdb/version.h" || true)"
+    major="${version%%.*}"
+    if [[ "${major}" =~ ^[0-9]+$ ]] && (( major >= 11 )); then
+        printf '%s\n' "-std=c++20"
+    else
+        printf '%s\n' "-std=c++17"
+    fi
+}
+
 # 依次尝试静态库(全套可选依赖)、动态库、静态库(精简依赖)三种链接方式。
 compile_api_smoke() {
     local src="$1" out="$2" log="$3"
-    if g++ -std=c++17 -I"${ROCKSDB_INCLUDE_DIR}" "${src}" -o "${out}" \
+    local std
+    std="$(rocksdb_cxx_std)"
+    if g++ "${std}" -I"${ROCKSDB_INCLUDE_DIR}" "${src}" -o "${out}" \
         "${ROCKSDB_LIB_DIR}/librocksdb.a" -lz -lbz2 -lsnappy -llz4 -lzstd -lpthread -ldl >>"${log}" 2>&1; then
         return 0
     fi
-    if g++ -std=c++17 -I"${ROCKSDB_INCLUDE_DIR}" "${src}" -o "${out}" \
+    if g++ "${std}" -I"${ROCKSDB_INCLUDE_DIR}" "${src}" -o "${out}" \
         -L"${ROCKSDB_LIB_DIR}" -lrocksdb -lz -lpthread -ldl >>"${log}" 2>&1; then
         return 0
     fi
-    if g++ -std=c++17 -I"${ROCKSDB_INCLUDE_DIR}" "${src}" -o "${out}" \
+    if g++ "${std}" -I"${ROCKSDB_INCLUDE_DIR}" "${src}" -o "${out}" \
         "${ROCKSDB_LIB_DIR}/librocksdb.a" -lz -lpthread -ldl >>"${log}" 2>&1; then
         return 0
     fi
@@ -98,6 +136,14 @@ run_api_smoke() {
     : >"${RESULTS_DIR}/api_smoke.log"
     compile_api_smoke "${src}" "${bin}" "${RESULTS_DIR}/api_smoke.log" || return $?
     "${bin}" "${db_dir}" || return $?
+}
+
+# api-smoke 需要就地编译;prebuilt 模式的软件镜像通常不含编译器,缺失时按发行版补装。
+ensure_smoke_compiler() {
+    command -v g++ >/dev/null 2>&1 && return 0
+    log "g++ not found; installing build tools for the API smoke test"
+    install_os_packages build-tools || return 30
+    command -v g++ >/dev/null 2>&1
 }
 
 write_functional_result() {
@@ -164,7 +210,9 @@ func_check() {
     fi
 
     # 3) 自编译 API 烟测
-    if run_api_smoke >"${RESULTS_DIR}/api_smoke.log" 2>&1; then
+    if ! ensure_smoke_compiler; then
+        smoke_detail="C++ compiler is unavailable for the API smoke test"
+    elif run_api_smoke >"${RESULTS_DIR}/api_smoke.log" 2>&1; then
         smoke_status="passed"
         smoke_detail="compiled C++ smoke: Open/Put/Get/reopen ok"
     else

@@ -92,23 +92,57 @@ find_rocksdb_include_dir() {
     return 1
 }
 
+# 目录中是否存在 rocksdb 库文件(静态库、开发软链或带版本号的共享库)。
+rocksdb_dir_has_lib() {
+    local dir="$1" lib
+    [[ -n "${dir}" && -d "${dir}" ]] || return 1
+    for lib in "${dir}/librocksdb.a" "${dir}/librocksdb.so" "${dir}"/librocksdb.so.*; do
+        [[ -f "${lib}" ]] && return 0
+    done
+    return 1
+}
+
 # 在若干候选目录中定位 librocksdb 库目录。
 find_rocksdb_lib_dir() {
     local candidate
     local -a candidates=(
         "${ROCKSDB_LIB_DIR:-}"
         "/usr/local/lib"
+        "/usr/local/lib64"
         "/usr/lib"
+        "/usr/lib64"
         "/usr/lib/$(uname -m)-linux-gnu"
         "${PERF_WORK_DIR}/rocksdb-source"
     )
     for candidate in "${candidates[@]}"; do
-        if [[ -n "${candidate}" && ( -f "${candidate}/librocksdb.a" || -f "${candidate}/librocksdb.so" ) ]]; then
+        if rocksdb_dir_has_lib "${candidate}"; then
             printf '%s\n' "${candidate}"
             return 0
         fi
     done
     return 1
+}
+
+# db_bench 可能依赖非标准路径下的共享库(如镜像里的 librocksdb.so.N),运行前需补进
+# LD_LIBRARY_PATH,否则报 "error while loading shared libraries: librocksdb.so.N"。
+rocksdb_runtime_lib_path() {
+    local dir out=""
+    local -a dirs=(
+        "${ROCKSDB_LIB_DIR:-}"
+        "/usr/local/lib"
+        "/usr/local/lib64"
+        "/usr/lib"
+        "/usr/lib64"
+        "/usr/lib/$(uname -m)-linux-gnu"
+    )
+    if [[ -n "${ROCKSDB_DB_BENCH_BIN}" ]]; then
+        dirs=("$(dirname "${ROCKSDB_DB_BENCH_BIN}")/../lib" "${dirs[@]}")
+    fi
+    for dir in "${dirs[@]}"; do
+        [[ -n "${dir}" && -d "${dir}" ]] || continue
+        out+="${dir}:"
+    done
+    printf '%s\n' "${out}"
 }
 
 # 定位 db_bench(上游自带基准工具)。
@@ -215,6 +249,11 @@ install_os_packages() {
             python3) rhel+=(python3); debian+=(python3) ;;
             curl) rhel+=(curl); debian+=(curl) ;;
             build-tools) rhel+=(gcc gcc-c++ make); debian+=(gcc g++ make) ;;
+            # db_bench 运行时依赖 gflags;缺失会直接报 "Please install gflags to run rocksdb tools"。
+            rocksdb-gflags)
+                rhel+=(gflags-devel)
+                debian+=(libgflags-dev)
+                ;;
             # 压缩库开发包:RocksDB 会自动探测,缺失也能编译(功能降级)。
             rocksdb-libs)
                 rhel+=(snappy-devel lz4-devel libzstd-devel zlib-devel bzip2-devel)
@@ -246,6 +285,12 @@ install_os_packages() {
     esac
 }
 
+# 运行期依赖:gflags 必装(否则 db_bench 无法启动);压缩库开发包为可选,装不上则编译降级。
+ensure_rocksdb_runtime_deps() {
+    install_os_packages rocksdb-gflags || return 30
+    install_os_packages rocksdb-libs || log "WARN: optional compression dev packages unavailable"
+}
+
 require_build_commands() {
     local -a logical=()
     command -v git >/dev/null 2>&1 || logical+=(git)
@@ -258,8 +303,7 @@ require_build_commands() {
         log "installing missing dependencies: ${logical[*]}"
         install_os_packages "${logical[@]}" || return 30
     fi
-    # 压缩库开发包为可选,装不上也继续(编译时自动降级)。
-    install_os_packages rocksdb-libs || log "WARN: optional compression dev packages unavailable"
+    ensure_rocksdb_runtime_deps || return $?
 }
 
 json_escape() {
