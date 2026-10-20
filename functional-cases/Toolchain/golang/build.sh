@@ -54,6 +54,12 @@ go_archive_sha256() {
         1.27.0:arm64)
             printf '%s\n' "51798d2c42d0e1c6ed7fd9f48728b4193abac9e8aad6dbac2fe96a81f5909bda"
             ;;
+        1.27.1:amd64)
+            printf '%s\n' "63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445"
+            ;;
+        1.27.1:arm64)
+            printf '%s\n' "3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec"
+            ;;
         *)
             return 1
             ;;
