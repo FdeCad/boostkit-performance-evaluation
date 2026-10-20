@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # OceanBase 功能测试共享库:由 build.sh / test.sh source。
 # 提供运行路径初始化、OS 探测与依赖安装、JSON 辅助。
-# OceanBase 属“部署服务型”软件:通过 OceanBase Deployer(obd) 的 demo 命令在任务私有
-# 目录部署单机演示集群,再用 mysql 协议做最小可用性 + 功能验证。
+# OceanBase 属“部署服务型”软件:官方 oceanbase-ce rpm 自带 obshell 与
+# profile/oceanbase-service.sh,解包后执行 start 即可完成首次 bootstrap 并启动,
+# 无需 OceanBase Deployer(obd)。两条链路同构:
+#   prebuilt - 预构建镜像内已解包好 rpm,直接 start
+#   build    - 现场下载官方 rpm、解包到 /home/admin/oceanbase、start
 set -euo pipefail
 
 SOFTWARE_NAME="oceanbase"
@@ -17,7 +20,7 @@ PERF_WORK_DIR="${PERF_WORK_DIR:-}"
 RESULTS_DIR="${RESULTS_DIR:-}"
 PERF_ACTUAL_VERSION_FILE="${PERF_ACTUAL_VERSION_FILE:-}"
 
-# OceanBase 连接配置(obd demo 默认 root 无密码)。
+# OceanBase 连接配置(observer 默认 root 无密码)。
 OB_HOST="${OB_HOST:-127.0.0.1}"
 OB_PORT="${OB_PORT:-}"
 OB_RPC_PORT="${OB_RPC_PORT:-}"
@@ -32,18 +35,31 @@ OB_SYSBENCH_TIME="${OB_SYSBENCH_TIME:-10}"
 OB_SYSBENCH_THREADS="${OB_SYSBENCH_THREADS:-4}"
 
 # 部署相关路径(在 configure_runtime_paths 中赋值)。
-OB_DEPLOY_HOME=""
-OBD_HOME=""
+OB_DATA_DIR=""
+OB_REDO_DIR=""
 STANDALONE_OWNS_WORK_DIR=0
 STANDALONE_KEEP_WORK_DIR=0
 
-# 预构建镜像内 observer 的启动脚本:由 oceanbase-ce rpm 安装,镜像 CMD 亦调用它。
-OB_IMAGE_SERVICE_SCRIPT="/home/admin/oceanbase/profile/oceanbase-service.sh"
+# oceanbase-ce rpm 的固定安装布局:脚本内的 prefix 与配置文件路径都是硬编码的,
+# 与 openEuler 预构建镜像完全一致。
+OB_RPM_ROOT="/home/admin/oceanbase"
+OB_SERVICE_SCRIPT="${OB_RPM_ROOT}/profile/oceanbase-service.sh"
+OB_CNF_FILE="/etc/oceanbase.cnf"
+# 与官方镜像的 el7 源保持一致,避免与 el8 目录里的包内容产生差异。
+OB_RPM_MIRROR_BASE="https://mirrors.oceanbase.com/community/stable/el/7"
+OB_SHELL_PORT="${OB_SHELL_PORT:-2886}"
 
-# Ubuntu/Debian 侧 obd 的上游官方 rpm 源,以及解包后的任务私有安装根目录(在
-# configure_runtime_paths 中赋值)。obd 只以 rpm 分发(PyPI 上没有对应包)。
-OBD_RPM_MIRROR_BASE="https://mirrors.oceanbase.com/community/stable/el/8"
-OBD_ROOT=""
+# observer 资源参数。rpm 自带模板的默认值是 memory_limit=6G / log_disk_size=13G,
+# 这里收敛到刚好可用的 4G,两个硬约束(已实测):
+#   - memory_limit 低于 4G 会被 observer 判为 OB_INVALID_CONFIG 直接退出;
+#   - log_disk_size 不能低于 3 * memory_limit,即 4G 内存至少要 12G。
+OB_MEMORY_LIMIT="${OB_MEMORY_LIMIT:-4G}"
+OB_SYSTEM_MEMORY="${OB_SYSTEM_MEMORY:-1G}"
+OB_DATAFILE_SIZE="${OB_DATAFILE_SIZE:-2G}"
+OB_DATAFILE_MAXSIZE="${OB_DATAFILE_MAXSIZE:-20G}"
+OB_LOG_DISK_SIZE="${OB_LOG_DISK_SIZE:-13G}"
+# rpm 模板写死 cpu_count=16,小规格机器上会被 observer 判为非法配置,按实际核数给。
+OB_CPU_COUNT="${OB_CPU_COUNT:-$(nproc 2>/dev/null || printf '16')}"
 
 log() { printf '[oceanbase-func] %s\n' "$*"; }
 
@@ -110,40 +126,28 @@ configure_runtime_paths() {
     if [[ -z "${FUNC_OS}" ]]; then
         FUNC_OS="$(detect_os_label)"
     fi
-    # 端口:build 模式由 run_id 派生以隔离并发任务;prebuilt 模式的 observer 由镜像内
-    # oceanbase-service.sh 按自身配置固定监听 2881/2882,必须对齐镜像端口才能连上。
-    local checksum
-    if [[ -z "${OB_PORT}" ]]; then
-        if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
-            OB_PORT=2881
-        else
-            checksum="$(printf '%s' "${PERF_RUN_ID}" | cksum)"
-            OB_PORT="$((20000 + ${checksum%% *} % 20000))"
-        fi
-    fi
+    # 每个用例独占一个容器(独立 network namespace),端口不会互相冲突,因此两种模式
+    # 都固定用 rpm 自带 oceanbase.cnf 的默认端口,与 openEuler 预构建镜像完全一致。
+    OB_PORT="${OB_PORT:-2881}"
     [[ "${OB_PORT}" =~ ^[0-9]+$ ]] && ((OB_PORT >= 1024 && OB_PORT <= 65535)) || {
         log "ERROR: invalid OB_PORT: ${OB_PORT}"
         return 10
     }
-    if [[ -z "${OB_RPC_PORT}" ]]; then
-        if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
-            OB_RPC_PORT=2882
-        else
-            OB_RPC_PORT="$((OB_PORT + 20000))"
-        fi
-    fi
+    OB_RPC_PORT="${OB_RPC_PORT:-2882}"
     ((OB_RPC_PORT <= 65535)) || {
         log "ERROR: invalid OB_RPC_PORT: ${OB_RPC_PORT}"
         return 10
     }
 
-    OB_DEPLOY_HOME="${PERF_WORK_DIR}/oceanbase-demo"
-    OBD_HOME="${PERF_WORK_DIR}/obd-meta"
-    OBD_ROOT="${PERF_WORK_DIR}/obd-root"
+    # observer 的数据目录放在任务私有目录,随容器删除与工作目录回收一起消失。
+    OB_DATA_DIR="${PERF_WORK_DIR}/oceanbase-data"
+    OB_REDO_DIR="${PERF_WORK_DIR}/oceanbase-redo"
 
     export SOFTWARE_NAME CATEGORY SOFTWARE_VERSION EXPECTED_ARCH FUNC_OS FUNC_HARDWARE FUNC_MODE
     export PERF_RUN_ID PERF_WORK_DIR RESULTS_DIR PERF_ACTUAL_VERSION_FILE TMPDIR
-    export OB_HOST OB_PORT OB_RPC_PORT OB_USER OB_PASSWORD OB_DB OBD_HOME OBD_ROOT
+    export OB_HOST OB_PORT OB_RPC_PORT OB_SHELL_PORT OB_USER OB_PASSWORD OB_DB
+    export OB_DATA_DIR OB_REDO_DIR
+    export OB_MEMORY_LIMIT OB_SYSTEM_MEMORY OB_DATAFILE_SIZE OB_DATAFILE_MAXSIZE OB_LOG_DISK_SIZE OB_CPU_COUNT
 }
 
 initialize_runtime() {
@@ -193,23 +197,29 @@ wait_observer_ready() {
     return 40
 }
 
-# prebuilt 模式:镜像内已装好 observer(obd 不在镜像内),直接启动镜像自带实例并复用,
-# 不联网从 OceanBase 官方仓库拉包,也不受 LSE/non-LSE 变体选择影响。
-start_image_observer() {
+# 两种模式共用同一条启动路径:oceanbase-service.sh 会读取 /etc/oceanbase.cnf,
+# 拉起 obshell,再由 obshell 完成首次 bootstrap 并启动 observer。
+start_observer_service() {
+    local origin="$1"
     if check_observer_ready; then
         log "an OceanBase observer is already reachable on ${OB_HOST}:${OB_PORT}; reusing it"
         return 0
     fi
-    [[ -f "${OB_IMAGE_SERVICE_SCRIPT}" ]] || {
-        log "ERROR: the prebuilt image does not ship ${OB_IMAGE_SERVICE_SCRIPT}"
+    [[ -f "${OB_SERVICE_SCRIPT}" ]] || {
+        log "ERROR: ${OB_SERVICE_SCRIPT} is missing; the oceanbase-ce rpm was not unpacked"
         return 30
     }
-    log "starting the observer bundled in the prebuilt image (${OB_IMAGE_SERVICE_SCRIPT})"
-    bash "${OB_IMAGE_SERVICE_SCRIPT}" start || {
-        log "ERROR: failed to start the observer bundled in the prebuilt image"
+    log "starting the observer ${origin} (${OB_SERVICE_SCRIPT})"
+    bash "${OB_SERVICE_SCRIPT}" start || {
+        log "ERROR: failed to start the observer ${origin}"
         return 40
     }
     return 0
+}
+
+# prebuilt 模式:镜像内已解包好 oceanbase-ce rpm,直接启动镜像自带实例并复用。
+start_image_observer() {
+    start_observer_service "bundled in the prebuilt image"
 }
 
 # ---------- OS 感知的依赖安装 ----------
@@ -238,85 +248,115 @@ apt_install() {
     fi
 }
 
-# OceanBase 官方社区 el8 源(仅 rhel 家族可用)。
-write_oceanbase_repo() {
-    local repo_file="/etc/yum.repos.d/oceanbase.repo" arch
-    [[ -f "${repo_file}" ]] && return 0
-    arch="$(uname -m)"
-    if [[ "$(id -u)" -eq 0 ]]; then
-        printf '[oceanbase]\nname=OceanBase Community el8\nbaseurl=https://mirrors.oceanbase.com/community/stable/el/8/%s/\nenabled=1\ngpgcheck=0\n' \
-            "${arch}" >"${repo_file}"
-    elif command -v sudo >/dev/null 2>&1; then
-        printf '[oceanbase]\nname=OceanBase Community el8\nbaseurl=https://mirrors.oceanbase.com/community/stable/el/8/%s/\nenabled=1\ngpgcheck=0\n' \
-            "${arch}" | sudo tee "${repo_file}" >/dev/null
+# ---------- 官方 oceanbase-ce rpm ----------
+#
+# 与 openEuler 预构建镜像完全同构:取官方 oceanbase-ce rpm,按包内布局解包到 /,
+# 再用自带的 profile/oceanbase-service.sh 启动。obd 在本用例中不再出现。
+
+# kunpeng920 没有 LSE atomics,必须用 .nonlse 变体;kunpeng950 用普通变体。
+ob_rpm_suffix() {
+    if grep -qw atomics /proc/cpuinfo 2>/dev/null; then
+        printf '\n'
     else
-        return 1
+        printf '.nonlse\n'
     fi
 }
 
-# obd 只以 rpm 分发,上游没有 PyPI 包(oceanbase-deploy/ob-deploy 均无发布),因此
-# Ubuntu/Debian 侧改为取官网 el8 源里的上游 rpm,解包到任务私有目录后直接运行:
-# obd 是自带解释器的单文件程序,不依赖系统 Python,天然绕开 PEP 668。
-# 私有目录通过 OBD_INSTALL_PRE 指认(obd 的 tool.py 用它推导安装路径 /usr/obd)。
-activate_private_obd() {
-    [[ -x "${OBD_ROOT}/usr/bin/obd" ]] || return 1
-    export OBD_INSTALL_PRE="${OBD_ROOT}"
-    export PATH="${OBD_ROOT}/usr/bin:${PATH}"
-    return 0
-}
-
-# 取上游 el8 源目录索引里版本最高的 ob-deploy rpm 文件名(形如 ob-deploy-4.7.0-3.el8.aarch64.rpm)。
-# 索引取不到或无匹配时输出为空并返回 0,由调用方判定为空即报错(避免 set -e 静默退出)。
-obd_rpm_filename() {
-    local arch="$1" listing
+# 从官方 el7 源目录索引里挑出与请求版本同线、变体匹配的最高 oceanbase-ce 包,
+# 以及与它同一 build 的 ce-libs 包(observer 的 libaio.so.1 由它提供)。
+# 索引取不到或无匹配时输出为空并返回 0,由调用方判定为空即报错。
+ob_rpm_plan() {
+    local arch="$1" version="$2" suffix listing name base candidate="" best=""
+    arch="$(normalize_arch "${arch}")"
+    suffix="$(ob_rpm_suffix)"
     listing="$(curl -fsSL --retry 3 --connect-timeout 30 \
-        "${OBD_RPM_MIRROR_BASE}/${arch}/" 2>/dev/null || true)"
-    printf '%s\n' "${listing}" |
-        grep -oE "ob-deploy-[0-9][0-9A-Za-z._-]*\.el8\.${arch}\.rpm" |
-        sort -V | tail -n 1 || true
+        "${OB_RPM_MIRROR_BASE}/${arch}/" 2>/dev/null || true)"
+    [[ -n "${listing}" ]] || return 0
+    while IFS= read -r name; do
+        [[ -n "${name}" ]] || continue
+        base="${name%.el7.${arch}.rpm}"
+        case "${base}" in
+            *.nonlse) [[ "${suffix}" == ".nonlse" ]] || continue ;;
+            *) [[ -z "${suffix}" ]] || continue ;;
+        esac
+        candidate="${base#oceanbase-ce-}"
+        candidate="${candidate%-*}"
+        version_matches "${candidate}" "${version}" || continue
+        if [[ -z "${best}" ]] ||
+            [[ "$(printf '%s\n%s\n' "${best}" "${name}" | sort -V | tail -n 1)" == "${name}" ]]; then
+            best="${name}"
+        fi
+    done <<<"$(printf '%s\n' "${listing}" |
+        grep -oE "oceanbase-ce-[0-9][0-9A-Za-z._-]*\.el7\.${arch}\.rpm" |
+        grep -v '^oceanbase-ce-libs-' | sort -u)"
+    [[ -n "${best}" ]] || return 0
+    printf '%s\n%s\n' "${best}" "oceanbase-ce-libs-${best#oceanbase-ce-}"
 }
 
-install_obd_debian() {
-    local arch name url rpm_file executer
-    if activate_private_obd; then
-        return 0
-    fi
-    apt_install rpm cpio || return 30
-    arch="$(uname -m)"
-    name="$(obd_rpm_filename "${arch}")"
-    [[ -n "${name}" ]] || {
-        log "ERROR: no ob-deploy rpm found for ${arch} on ${OBD_RPM_MIRROR_BASE}"
+# 用 rpm 自带模板生成 /etc/oceanbase.cnf:端口、数据目录与资源参数按当前用例覆盖,
+# 其余保持上游默认。obshell 会把这份 cnf 合并进 profile/oceanbase.json 后拉起 observer。
+write_observer_cnf() {
+    local template="${OB_RPM_ROOT}/profile/oceanbase.cnf" item key
+    local -a overrides=(
+        "ip=${OB_HOST}"
+        "mysql_port=${OB_PORT}"
+        "rpc_port=${OB_RPC_PORT}"
+        "obshell_port=${OB_SHELL_PORT}"
+        "data_dir=${OB_DATA_DIR}"
+        "redo_dir=${OB_REDO_DIR}"
+        "datafile_size=${OB_DATAFILE_SIZE}"
+        "datafile_maxsize=${OB_DATAFILE_MAXSIZE}"
+        "cpu_count=${OB_CPU_COUNT}"
+        "memory_limit=${OB_MEMORY_LIMIT}"
+        "system_memory=${OB_SYSTEM_MEMORY}"
+        "log_disk_size=${OB_LOG_DISK_SIZE}"
+    )
+    [[ -f "${template}" ]] || {
+        log "ERROR: ${template} is missing; the oceanbase-ce rpm was not unpacked"
         return 30
     }
-    url="${OBD_RPM_MIRROR_BASE}/${arch}/${name}"
-    rpm_file="${PERF_WORK_DIR}/${name}"
-    log "installing obd from the upstream rpm into ${OBD_ROOT}"
-    curl -fsSL --retry 3 --connect-timeout 30 -o "${rpm_file}" "${url}" || {
-        log "ERROR: failed to download ${url}"
+    cp -f "${template}" "${OB_CNF_FILE}" || return 30
+    for item in "${overrides[@]}"; do
+        key="${item%%=*}"
+        if grep -qE "^[[:space:]]*${key}=" "${OB_CNF_FILE}"; then
+            sed -i -E "s|^[[:space:]]*${key}=.*|${item}|" "${OB_CNF_FILE}"
+        else
+            printf '%s\n' "${item}" >>"${OB_CNF_FILE}"
+        fi
+    done
+    mkdir -p "${OB_DATA_DIR}" "${OB_REDO_DIR}" || return 30
+}
+
+install_oceanbase_rpm() {
+    local arch rpm_dir url name ce_name libs_name
+    local -a plan=()
+    arch="$(normalize_arch "$(uname -m)")"
+    rpm_dir="${PERF_WORK_DIR}/rpm"
+    mkdir -p "${rpm_dir}" || return 30
+    mapfile -t plan <<<"$(ob_rpm_plan "${arch}" "${SOFTWARE_VERSION}")"
+    ce_name="${plan[0]:-}"
+    libs_name="${plan[1]:-}"
+    [[ -n "${ce_name}" && -n "${libs_name}" ]] || {
+        log "ERROR: no oceanbase-ce ${SOFTWARE_VERSION} rpm for ${arch} on ${OB_RPM_MIRROR_BASE}"
         return 30
     }
-    rm -rf -- "${OBD_ROOT}"
-    mkdir -p "${OBD_ROOT}" || return 30
-    # rpm 内是绝对路径(usr/bin/obd、usr/obd/*),cpio 会去掉前导斜杠,正好落到私有根下。
-    (cd "${OBD_ROOT}" && rpm2cpio "${rpm_file}" | cpio -idm --quiet --no-absolute-filenames) || {
-        log "ERROR: failed to unpack ${name} into ${OBD_ROOT}"
-        return 30
-    }
-    rm -f "${rpm_file}"
-    [[ -f "${OBD_ROOT}/usr/bin/obd" ]] || {
-        log "ERROR: ${name} does not provide usr/bin/obd"
-        return 30
-    }
-    chmod +x "${OBD_ROOT}/usr/bin/obd"
-    executer="${OBD_ROOT}/usr/obd/lib/executer/executer27/bin/executer"
-    if [[ -f "${executer}" ]]; then
-        chmod +x "${executer}"
-    fi
-    activate_private_obd || {
-        log "ERROR: obd is unusable after unpacking ${name} into ${OBD_ROOT}"
-        return 30
-    }
-    return 0
+    for name in "${ce_name}" "${libs_name}"; do
+        url="${OB_RPM_MIRROR_BASE}/${arch}/${name}"
+        log "downloading ${url}"
+        curl -fsSL --retry 3 --connect-timeout 30 -o "${rpm_dir}/${name}" "${url}" || {
+            log "ERROR: failed to download ${url}"
+            return 30
+        }
+        # rpm 内是 home/admin/oceanbase/... 相对路径,解包到 / 即落到 rpm 约定的安装位置。
+        rpm2cpio "${rpm_dir}/${name}" | (cd / && cpio -idm --quiet --no-absolute-filenames) || {
+            log "ERROR: failed to unpack ${name}"
+            return 30
+        }
+        rm -f "${rpm_dir}/${name}"
+    done
+    chmod +x "${OB_SERVICE_SCRIPT}" || return 30
+    write_observer_cnf || return $?
+    start_observer_service "unpacked from ${ce_name}"
 }
 
 install_oceanbase_dependencies() {
@@ -324,7 +364,7 @@ install_oceanbase_dependencies() {
     local -a packages=() want=()
     family="$(os_family)"
 
-    for want in python3 curl; do
+    for want in python3 curl hostname; do
         command -v "${want}" >/dev/null 2>&1 || packages+=("${want}")
     done
     # mysql 只是命令名,各发行版的包名不同:Debian/Ubuntu 侧是 default-mysql-client,
@@ -336,32 +376,22 @@ install_oceanbase_dependencies() {
         esac
     fi
     command -v sysbench >/dev/null 2>&1 || packages+=("sysbench")
+    # build 模式要现场解包官方 rpm;observer 依赖的 libaio.so.1 由 oceanbase-ce-libs
+    # 自带(obshell 启动时会设 LD_LIBRARY_PATH=$prefix/lib),不需要系统 libaio。
+    if [[ "${FUNC_MODE}" != "prebuilt" ]]; then
+        packages+=(rpm cpio)
+    fi
 
     case "${family}" in
         rhel)
-            # prebuilt 镜像内已有 observer、且不含 obd,无需也不应安装部署器。
-            if [[ "${FUNC_MODE}" != "prebuilt" ]] &&
-                ! command -v obd >/dev/null 2>&1 && ! rpm -q ob-deploy >/dev/null 2>&1; then
-                write_oceanbase_repo || {
-                    log "ERROR: cannot configure the OceanBase package repository"
-                    return 30
-                }
-                packages+=("ob-deploy")
-            fi
             (( ${#packages[@]} == 0 )) && return 0
             log "installing via dnf: ${packages[*]}"
             dnf_install "${packages[@]}" || return 30
             ;;
         debian)
-            # observer 是 el8 二进制:libaio 是 rpm 里声明的硬依赖,libnuma 与上游镜像的预装保持一致。
-            packages+=(libaio1t64 libnuma1)
-            (( ${#packages[@]} > 0 )) && { apt_install "${packages[@]}" || return 30; }
-            if [[ "${FUNC_MODE}" != "prebuilt" ]] && ! command -v obd >/dev/null 2>&1; then
-                install_obd_debian || {
-                    log "ERROR: could not obtain obd; OceanBase deployment requires the deployer"
-                    return 30
-                }
-            fi
+            (( ${#packages[@]} == 0 )) && return 0
+            log "installing via apt: ${packages[*]}"
+            apt_install "${packages[@]}" || return 30
             ;;
         *)
             log "ERROR: unsupported OS family: ${family}"

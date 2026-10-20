@@ -139,14 +139,12 @@ func_check() {
 
 func_cleanup() {
     initialize_runtime || return $?
-    export OBD_HOME
-    # build 模式下 obd 解包在任务私有目录,清理时需重新激活才能销毁集群。
-    activate_private_obd || true
-    if command -v obd >/dev/null 2>&1; then
-        obd cluster destroy demo -f >/dev/null 2>&1 || true
+    # 与启动同一条路径:oceanbase-service.sh 通过 obshell 停止 observer。
+    if [[ -f "${OB_SERVICE_SCRIPT}" ]]; then
+        bash "${OB_SERVICE_SCRIPT}" stop >/dev/null 2>&1 || true
     fi
-    [[ -d "${OB_DEPLOY_HOME}" ]] && rm -rf -- "${OB_DEPLOY_HOME}"
-    log "cleaned oceanbase task data"
+    rm -rf -- "${OB_DATA_DIR}" "${OB_REDO_DIR}"
+    log "stopped the oceanbase observer and removed task data"
 }
 
 # ---------- 独立运行入口 ----------

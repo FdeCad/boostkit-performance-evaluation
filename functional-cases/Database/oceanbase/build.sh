@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # OceanBase 构建脚本:环境采集 + 准备被测软件(分层获取 observer 或校验镜像)。
-#   FUNC_MODE=prebuilt - 镜像内已装好 observer:启动镜像自带实例(2881)并校验版本
-#   FUNC_MODE=build    - 分层优先获取:官方二进制(obd 拉包)→ 三方仓库 → 源码编译
+#   FUNC_MODE=prebuilt - 镜像内已解包好 observer:启动镜像自带实例(2881)并校验版本
+#   FUNC_MODE=build    - 分层优先获取:官方 rpm 解包直装 → 三方仓库 → 源码编译
 # 暴露给 Framework 的阶段:prepare、install。独立执行时依次运行这两个阶段。
 set -euo pipefail
 
@@ -38,41 +38,23 @@ EOF
 #
 # build 模式采用“分层优先获取”:每层取得 observer 后必须校验 SELECT version()
 # == SOFTWARE_VERSION,不匹配或获取失败则降级到下一层,三层都不可行才让 install 失败:
-#   1) official-binary 上游官方二进制:OceanBase 以官方镜像/官方包分发。config/distribution.yaml
-#      记 primary=official-mirror、channels.docker=oceanbase/oceanbase-ce。build 模式运行在普通
-#      容器内,没有嵌套 docker/podman,镜像渠道无法直接使用,故改用其等效的官方发布包 —— 通过
-#      官方部署器 obd 从 OceanBase 官方仓库拉取指定版本的 oceanbase-ce 包,在任务私有目录部署。
+#   1) official-binary 上游官方二进制:下载官方 oceanbase-ce rpm,按包内布局解包到 /,
+#      再用包自带的 profile/oceanbase-service.sh 启动 —— 与 openEuler 预构建镜像完全同构。
+#      不使用 obd(它会把版本/磁盘/内存检查全部前置,且下载远端索引不可靠)。
 #   2) thirdparty      三方仓库:distribution.yaml 中 oceanbase 的 pypi/conda/apt/spack 全为 null,
 #      没有可用的三方二进制仓库 → 该层不可用。
 #   3) source          源码编译:上游 oceanbase/oceanbase 依赖海量第三方子模块、编译耗时以小时计,
 #      不适合在功能测试容器内完成 → 该层不可用。
 
-deploy_with_obd() {
-    command -v obd >/dev/null 2>&1 || {
-        log "obd is required to deploy the OceanBase observer"
-        return 30
-    }
-    mkdir -p "${OBD_HOME}" "${OB_DEPLOY_HOME}"
-    log "deploying OceanBase ${SOFTWARE_VERSION} observer via obd demo (task-private)"
-    obd demo -c oceanbase-ce \
-        "--oceanbase-ce.version=${SOFTWARE_VERSION}" \
-        "--oceanbase-ce.mysql_port=${OB_PORT}" \
-        "--oceanbase-ce.rpc_port=${OB_RPC_PORT}" \
-        "--home_path=${OB_DEPLOY_HOME}" || {
-        log "ERROR: obd demo deployment failed"
-        return 40
-    }
-}
-
 # ---------- 分层获取 ----------
 
-# 层 1:上游官方二进制 —— 经官方部署器 obd 拉取并部署指定版本的 oceanbase-ce 官方包。
+# 层 1:上游官方二进制 —— 官方 oceanbase-ce rpm 解包直装。
 oceanbase_layer_official_binary() {
     if check_observer_ready; then
         log "an OceanBase observer is already reachable on ${OB_HOST}:${OB_PORT}; reusing it"
         return 0
     fi
-    deploy_with_obd || return 1
+    install_oceanbase_rpm || return 1
     wait_observer_ready 120 || return 1
     return 0
 }
@@ -116,12 +98,11 @@ func_install() {
 
     local actual=""
     if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
-        # 镜像内已装好 observer 与启动脚本(不含 obd):启动镜像自带实例并复用,
-        # 直接按镜像默认端口 2881 连接,不联网拉包、不走 obd 部署。
+        # 镜像内已解包好 observer 与启动脚本:启动镜像自带实例并复用。
         start_image_observer || return $?
         wait_observer_ready 120 || return $?
     else
-        # 分层优先获取(build 模式):官方二进制(obd)→ 三方仓库 → 源码编译。
+        # 分层优先获取(build 模式):官方 rpm → 三方仓库 → 源码编译。
         acquire_oceanbase_build || return $?
     fi
 

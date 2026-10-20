@@ -23,14 +23,16 @@ execution:
     cleanup:
       script: test.sh
       function: func_cleanup
-  # 分层获取(官方二进制 obd 拉包 → 三方仓库 → 源码编译)+ 最小可用性验证,90 分钟足够。
   timeout_minutes: 90
-  # 经 obd 拉取并部署 observer,下载与部署产物较大。
-  min_free_disk_gb: 10
+  # build 模式下载官方 oceanbase-ce rpm(约 170MB)并解包(约 1.2GB),observer 首次
+  # bootstrap 还要按 datafile_size=2G + log_disk_size=13G 预留空间,峰值约 17GiB,
+  # 这里留 1GiB 余量。
+  min_free_disk_gb: 18
 
 # 功能判定项,名称与 functional_result.json 中 checks[].name 一一对应。
-# OceanBase 为部署服务型软件、集群较重,无轻量自带测试套件:
-# 采用官方部署工具 obd 拉起最小集群,再以 mysql 协议做最小可用性 + 功能验证。
+# OceanBase 为部署服务型软件:直接使用官方 oceanbase-ce rpm 自带的
+# oceanbase-service.sh 拉起单机 observer(与 openEuler 预构建镜像同构),
+# 再以 mysql 协议做最小可用性 + 功能验证。
 checks:
   - name: version
     description: observer 的 SELECT version() 必须等于请求版本
