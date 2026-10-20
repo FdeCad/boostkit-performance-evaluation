@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # x264 测试脚本:功能判定 + 收尾。
-# 判定:版本校验 + 上游 checkasm 汇编一致性测试 + 生成 YUV 编码 smoke。
+# 判定:版本校验 + 上游 checkasm 与独立解码验证 + 基础编码 smoke。
 # 暴露给 Framework 的阶段:check、cleanup。独立执行时依次运行这两个阶段。
 set -euo pipefail
 
@@ -10,18 +10,8 @@ source "${SCRIPT_DIR}/common.sh"
 
 # ---------- 阶段:check ----------
 
-# 上游 checkasm 汇编一致性测试(需要 install 阶段准备好的源码树)。
-run_checkasm() {
-    local tree
-    tree="$(resolve_x264_source_dir)" || {
-        log "ERROR: x264 source tree with configure/Makefile not found"
-        return 40
-    }
-    (cd "${tree}" && make checkasm)
-}
-
-# 生成一段小尺寸裸 YUV,用 x264 CLI 编码成 H.264 码流,并校验码流含 NAL 起始码。
-run_encode_smoke() {
+# 生成一段小尺寸裸 YUV(i420,8bit)。
+generate_yuv() {
     mkdir -p "${X264_WORK_DIR}" || return 40
     python3 - "${X264_WORK_DIR}/input.yuv" <<'PY' || return 40
 import sys
@@ -37,9 +27,21 @@ with open(path, "wb") as handle:
         handle.write(bytes([128] * chroma))
         handle.write(bytes([128] * chroma))
 PY
-    "${X264_BIN}" --input-res 64x64 --frames 3 --fps 25 --preset ultrafast \
+}
+
+# make checkasm 只构建测试程序，必须显式执行两种位深的测试。
+run_checkasm() {
+    local tree
+    tree="$(resolve_x264_source_dir)" || return 40
+    (cd "${tree}" && make -j"$(nproc)" checkasm && ./checkasm8 && ./checkasm10) || return 40
+}
+
+# 基础编码 smoke:编码成码流并校验码流含 NAL 起始码。
+run_encode_smoke() {
+    "${X264_BIN}" --input-res 64x64 \
+        --fps 25 --frames 3 --preset ultrafast \
         -o "${X264_WORK_DIR}/out.264" "${X264_WORK_DIR}/input.yuv" \
-        >"${X264_WORK_DIR}/encode.log" 2>&1 || return 40
+        >"${RESULTS_DIR}/encode.log" 2>&1 || return 40
     python3 - "${X264_WORK_DIR}/out.264" <<'PY' || return 40
 import sys
 
@@ -50,9 +52,30 @@ PY
     return 0
 }
 
+# 安装失败必须报告失败，不能静默跳过解码验证。
+require_decoder() {
+    if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+        install_os_packages ffmpeg || return 30
+    fi
+    command -v ffmpeg >/dev/null && command -v ffprobe >/dev/null || return 30
+}
+
+run_decode_check() {
+    ffprobe -v error -select_streams v -count_frames \
+        -show_entries stream=codec_name,width,height,nb_read_frames -of json \
+        "${X264_WORK_DIR}/out.264" >"${RESULTS_DIR}/probe.json" || return 40
+    ffmpeg -nostdin -v error -xerror -err_detect explode \
+        -i "${X264_WORK_DIR}/out.264" -map 0:v:0 -vsync 0 \
+        -pix_fmt yuv420p -f rawvideo -y "${X264_WORK_DIR}/decoded.yuv" || return 40
+    python3 "${SCRIPT_DIR}/validate_output.py" decode "${RESULTS_DIR}/probe.json" \
+        "${X264_WORK_DIR}/decoded.yuv" || return 40
+}
+
 write_functional_result() {
     local overall="$1" v_status="$2" v_detail="$3" u_status="$4" u_detail="$5" c_status="$6" c_detail="$7"
-    FUNC_OVERALL="${overall}" \
+    FUNC_DEP_STATUS="${dependency_status}" FUNC_DEP_DETAIL="${dependency_detail}" \
+        FUNC_DEC_STATUS="${decode_status}" FUNC_DEC_DETAIL="${decode_detail}" \
+        FUNC_OVERALL="${overall}" \
         FUNC_V_STATUS="${v_status}" FUNC_V_DETAIL="${v_detail}" \
         FUNC_U_STATUS="${u_status}" FUNC_U_DETAIL="${u_detail}" \
         FUNC_C_STATUS="${c_status}" FUNC_C_DETAIL="${c_detail}" \
@@ -72,8 +95,10 @@ payload = {
     "run_id": env("PERF_RUN_ID"),
     "status": env("FUNC_OVERALL"),
     "checks": [
+        {"name": "decoder-dependencies", "status": env("FUNC_DEP_STATUS"), "detail": env("FUNC_DEP_DETAIL")},
+        {"name": "decode-check", "status": env("FUNC_DEC_STATUS"), "detail": env("FUNC_DEC_DETAIL")},
         {"name": "version", "status": env("FUNC_V_STATUS"), "detail": env("FUNC_V_DETAIL")},
-        {"name": "upstream-test", "status": env("FUNC_U_STATUS"), "detail": env("FUNC_U_DETAIL")},
+        {"name": "upstream-checkasm", "status": env("FUNC_U_STATUS"), "detail": env("FUNC_U_DETAIL")},
         {"name": "encode-smoke", "status": env("FUNC_C_STATUS"), "detail": env("FUNC_C_DETAIL")},
     ],
 }
@@ -90,39 +115,56 @@ func_check() {
         log "ERROR: x264 binary is unavailable"
         return 40
     }
+    generate_yuv || return $?
 
     local version_status="failed" version_detail=""
     local upstream_status="failed" upstream_detail=""
     local smoke_status="failed" smoke_detail=""
+    local dependency_status="failed" dependency_detail="FFmpeg dependency preparation failed; see decoder_dependencies.log"
+    local decode_status="failed" decode_detail="decoder dependencies or encoding unavailable"
     local actual
+
+    if require_decoder >"${RESULTS_DIR}/decoder_dependencies.log" 2>&1; then
+        dependency_status="passed"
+        dependency_detail="ffmpeg and ffprobe available"
+    fi
 
     # 1) 版本
     actual="$(read_x264_version || true)"
-    if [[ "${actual}" == "${SOFTWARE_VERSION}" ]]; then
+    if verify_x264_version; then
         version_status="passed"
-        version_detail="version=${actual}"
+        version_detail="source=${SOFTWARE_VERSION}, CLI=${actual}"
     else
         version_detail="x264 ${actual:-unknown}, expected ${SOFTWARE_VERSION}"
     fi
 
-    # 2) 上游 checkasm
+    # 2) 上游汇编一致性测试
     if run_checkasm >"${RESULTS_DIR}/upstream_checkasm.log" 2>&1; then
         upstream_status="passed"
-        upstream_detail="upstream make checkasm passed"
+        upstream_detail="checkasm8 and checkasm10 executed successfully"
     else
-        upstream_detail="upstream make checkasm failed; see upstream_checkasm.log"
+        upstream_detail="checkasm build or execution failed; see upstream_checkasm.log"
     fi
 
-    # 3) 编码 smoke
+    # 3) 基础编码 smoke
     if run_encode_smoke; then
         smoke_status="passed"
         smoke_detail="encoded 3 frames of 64x64 i420; bitstream contains NAL start codes"
     else
-        smoke_detail="x264 encode smoke failed; see ${X264_WORK_DIR}/encode.log"
+        smoke_detail="x264 encode smoke failed; see ${RESULTS_DIR}/encode.log"
+    fi
+
+    if [[ "${dependency_status}" == passed && "${smoke_status}" == passed ]]; then
+        if run_decode_check >"${RESULTS_DIR}/decode.log" 2>&1; then
+            decode_status="passed"
+            decode_detail="H.264 64x64; 3 decoded frames; I420 output 18432 bytes"
+        else
+            decode_detail="decode validation failed; see decode.log and probe.json"
+        fi
     fi
 
     local overall="passed"
-    if [[ "${version_status}" != "passed" || "${upstream_status}" != "passed" || "${smoke_status}" != "passed" ]]; then
+    if [[ "${dependency_status}" != passed || "${decode_status}" != passed || "${version_status}" != "passed" || "${upstream_status}" != "passed" || "${smoke_status}" != "passed" ]]; then
         overall="failed"
     fi
     write_functional_result "${overall}" \
@@ -132,11 +174,13 @@ func_check() {
     {
         printf 'x264 functional check (version %s, mode %s)\n' "${SOFTWARE_VERSION}" "${FUNC_MODE}"
         printf 'version:  %s - %s\n' "${version_status}" "${version_detail}"
-        printf 'upstream: %s - %s\n' "${upstream_status}" "${upstream_detail}"
+        printf 'checkasm:  %s - %s\n' "${upstream_status}" "${upstream_detail}"
         printf 'smoke:    %s - %s\n' "${smoke_status}" "${smoke_detail}"
+        printf 'dependencies: %s - %s\n' "${dependency_status}" "${dependency_detail}"
+        printf 'decode: %s - %s\n' "${decode_status}" "${decode_detail}"
         printf 'overall:  %s\n' "${overall}"
     } >"${RESULTS_DIR}/check.log"
-    log "checks: version=${version_status} upstream=${upstream_status} smoke=${smoke_status}"
+    log "checks: version=${version_status} checkasm=${upstream_status} smoke=${smoke_status} dependencies=${dependency_status} decode=${decode_status}"
 
     [[ "${overall}" == "passed" ]] || return 50
 }

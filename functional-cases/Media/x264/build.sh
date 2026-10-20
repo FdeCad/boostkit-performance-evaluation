@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # x264 构建脚本:环境采集 + 准备被测软件(构建或校验)。
-#   FUNC_MODE=prebuilt - 校验镜像内 x264 版本,并准备源码树以跑上游 checkasm
-#   FUNC_MODE=build    - 分层获取:上游无二进制、仓库包版本滞后,最终以源码编译(configure && make)为准
+#   FUNC_MODE=prebuilt - 校验镜像内 x264 版本,并校验源码树以跑上游 checkasm
+#   FUNC_MODE=build    - 固定校验归档源码编译(configure && make)
 # 暴露给 Framework 的阶段:prepare、install。独立执行时依次运行这两个阶段。
 set -euo pipefail
 
@@ -38,112 +38,67 @@ EOF
 
 # ---------- 阶段:install ----------
 
-# 克隆 x264 源码到指定目录(默认分支;上游默认分支即为请求版本对应的代码)。
-clone_x264_source() {
-    local target="$1"
-    command -v git >/dev/null 2>&1 || {
-        log "ERROR: git is required to fetch the x264 source"
-        return 40
-    }
-    rm -rf -- "${target}"
-    log "cloning x264 from ${X264_SOURCE_URL}"
-    GIT_TERMINAL_PROMPT=0 git clone --depth 1 "${X264_SOURCE_URL}" "${target}" || {
-        log "ERROR: failed to clone x264 from ${X264_SOURCE_URL}"
-        return 30
-    }
+# 固定归档与参考 Dockerfile 使用相同的校验值。
+fetch_x264_source() {
+    [[ "${SOFTWARE_VERSION}" == 0480cb05 ]] || return 10
+    [[ ! -e "${SOURCE_DIR}" ]] || { log "ERROR: source directory is not clean"; return 20; }
+    local archive="${PERF_WORK_DIR}/x264.tar.gz"
+    curl -fSL --connect-timeout 30 --retry 3 -o "${archive}" "${X264_ARCHIVE_URL}" || return 30
+    printf '%s  %s\n' "${X264_ARCHIVE_SHA256}" "${archive}" | sha256sum -c - || return 30
+    mkdir -p "${SOURCE_DIR}" || return 30
+    tar -xzf "${archive}" -C "${SOURCE_DIR}" --strip-components=1 || return 30
+    printf '%s\n' "${X264_ARCHIVE_SHA256}" >"${PERF_WORK_DIR}/source-sha256.txt"
 }
 
-# 就地 configure x264(超出源码树外构建会让 checkasm 目标不易定位)。
 configure_x264() {
-    local tree="$1"
-    (cd "${tree}" && ./configure --prefix="${INSTALL_DIR}" --enable-pic) || {
-        log "ERROR: x264 configure failed"
-        return 40
-    }
-}
-
-# ---------- 分层获取(build 模式) ----------
-# 按优先级依次尝试,每层以 read_x264_version 强校验 == SOFTWARE_VERSION,不匹配即降级到下一层:
-#   1. 上游官方二进制:x264 上游仅源码、无预编译产物(config/distribution.yaml: arm64_binary=na) → 本层不可行。
-#   2. 三方仓库已打包二进制/包:发行版仓库的 x264 包(apt=libx264-dev)与 conda-forge/x264 版本普遍滞后于
-#      请求版本,且 build 模式基础镜像无 conda;按"版本严格相等"门槛无法命中 → 本层不可行。
-#   3. 源码编译:从上游源码 configure && make(当前唯一可行层)。
-acquire_x264_upstream_binary() {
-    log "upstream x264 ships source only (arm64_binary=na); no official binary layer"
-    return 1
-}
-
-acquire_x264_from_repo() {
-    log "distro/conda x264 packages lag the requested ${SOFTWARE_VERSION} and conda is absent; repository layer cannot meet the exact-version gate"
-    return 1
-}
-
-# build 模式:克隆源码并完整构建安装出 x264 CLI。
-build_x264_from_source() {
-    [[ ! -e "${SOURCE_DIR}" ]] || {
-        log "ERROR: source directory is not clean: ${SOURCE_DIR}"
-        return 20
-    }
-    clone_x264_source "${SOURCE_DIR}" || return $?
-    mkdir -p "${INSTALL_DIR}"
-    log "building and installing x264 into ${INSTALL_DIR}"
-    configure_x264 "${SOURCE_DIR}" || return $?
-    (cd "${SOURCE_DIR}" && make -j"$(nproc)" && make install) || {
-        log "ERROR: x264 make or install failed"
-        return 40
-    }
-    [[ -x "${X264_BIN}" ]] || {
-        log "ERROR: x264 CLI was not produced at ${X264_BIN}"
-        return 40
-    }
-}
-
-# prebuilt 模式:镜像只有二进制,checkasm 需要一份已 configure 的源码树。
-prepare_source_tree_for_checkasm() {
-    local tree
-    if tree="$(resolve_x264_source_dir)"; then
-        X264_SOURCE_DIR="${tree}"
-        export X264_SOURCE_DIR
-        log "using x264 source tree at ${X264_SOURCE_DIR}"
-        return 0
-    fi
-    clone_x264_source "${SOURCE_DIR}" || return $?
-    configure_x264 "${SOURCE_DIR}" || return $?
-    X264_SOURCE_DIR="${SOURCE_DIR}"
-    export X264_SOURCE_DIR
+    mkdir -p "${BUILD_DIR}" "${INSTALL_DIR}" || return 40
+    (cd "${BUILD_DIR}" && ../configure --enable-shared --enable-pic --prefix="${INSTALL_DIR}") || return 40
 }
 
 func_install() {
     initialize_runtime || return $?
     check_architecture || return $?
     require_build_commands || return $?
+    fetch_x264_source || return $?
 
-    local actual
-    if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
-        # 镜像已装好:校验版本,并准备源码树以跑上游 checkasm。
-        [[ -x "${X264_BIN}" ]] || {
-            log "ERROR: x264 is not present in the software image (${X264_BIN})"
-            return 40
-        }
-        prepare_source_tree_for_checkasm || return $?
+    local tree actual
+    if [[ "${FUNC_MODE}" == prebuilt ]]; then
+        [[ -x "${X264_BIN}" ]] || return 40
+        tree="${X264_SOURCE_DIR:-/x264}"
+        if [[ -d "${tree}" ]]; then
+            # 只比较归档中原有文件，镜像中的构建产物不参与比较。
+            python3 - "${SOURCE_DIR}" "${tree}" <<'SOURCE_CHECK' || return 40
+from pathlib import Path
+import sys
+reference, installed = map(Path, sys.argv[1:])
+for path in reference.rglob('*'):
+    if path.is_file():
+        other = installed / path.relative_to(reference)
+        if not other.is_file() or path.read_bytes() != other.read_bytes():
+            raise SystemExit(f"image source differs from pinned archive: {other}")
+SOURCE_CHECK
+            if [[ -f "${tree}/x264_build/config.mak" && -f "${tree}/x264_build/Makefile" ]]; then
+                tree="${tree}/x264_build"
+            else
+                configure_x264 || return $?
+                tree="${BUILD_DIR}"
+            fi
+        else
+            configure_x264 || return $?
+            tree="${BUILD_DIR}"
+        fi
     else
-        acquire_x264_upstream_binary || {
-            log "x264 upstream-binary layer infeasible; trying the repository layer"
-            acquire_x264_from_repo || {
-                log "x264 repository layer infeasible; building from source"
-                build_x264_from_source || return $?
-            }
-        }
+        configure_x264 || return $?
+        (cd "${BUILD_DIR}" && make -j"$(nproc)" && make install) || return 40
+        tree="${BUILD_DIR}"
     fi
-
+    printf '%s\n' "${tree}" >"${PERF_WORK_DIR}/checkasm-build-dir"
     actual="$(read_x264_version || true)"
-    [[ "${actual}" == "${SOFTWARE_VERSION}" ]] || {
-        log "ERROR: x264 ${actual:-unknown}, expected ${SOFTWARE_VERSION}"
-        return 40
-    }
+    verify_x264_version || { log "ERROR: unexpected x264 version/source: ${actual:-unknown}"; return 40; }
+    "${X264_BIN}" --version >"${RESULTS_DIR}/binary-version.txt" 2>&1 || return 40
     mkdir -p "$(dirname "${PERF_ACTUAL_VERSION_FILE}")"
-    printf '%s\n' "${actual}" >"${PERF_ACTUAL_VERSION_FILE}" || return 40
-    log "x264 ${actual} ready (mode=${FUNC_MODE})"
+    printf '%s\n' "${SOFTWARE_VERSION}" >"${PERF_ACTUAL_VERSION_FILE}" || return 40
+    log "x264 source ${SOFTWARE_VERSION}, CLI ${actual} ready (mode=${FUNC_MODE})"
 }
 
 # ---------- 独立运行入口 ----------

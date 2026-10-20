@@ -5,7 +5,7 @@ set -euo pipefail
 
 SOFTWARE_NAME="x264"
 CATEGORY="Media"
-SOFTWARE_VERSION="${SOFTWARE_VERSION:-0.165.3223}"
+SOFTWARE_VERSION="${SOFTWARE_VERSION:-0480cb05}"
 EXPECTED_ARCH="${EXPECTED_ARCH:-$(uname -m)}"
 FUNC_OS="${FUNC_OS:-}"
 FUNC_HARDWARE="${FUNC_HARDWARE:-}"
@@ -15,7 +15,8 @@ PERF_WORK_DIR="${PERF_WORK_DIR:-}"
 RESULTS_DIR="${RESULTS_DIR:-}"
 PERF_ACTUAL_VERSION_FILE="${PERF_ACTUAL_VERSION_FILE:-}"
 
-X264_SOURCE_URL="${X264_SOURCE_URL:-https://code.videolan.org/videolan/x264.git}"
+X264_ARCHIVE_URL="${X264_ARCHIVE_URL:-https://github.com/mirror/x264/archive/0480cb05.tar.gz}"
+X264_ARCHIVE_SHA256="d0967a1348c85dfde363bb52610403be898171493100561efa0dd05d5fd1ae50"
 # 上游测试树所需的源码目录(必须含可构建的 configure 与 Makefile)。
 X264_SOURCE_DIR="${X264_SOURCE_DIR:-}"
 
@@ -105,11 +106,15 @@ configure_runtime_paths() {
         X264_BIN="${path}"
     else
         X264_BIN="${INSTALL_DIR}/bin/x264"
+        case ":${LD_LIBRARY_PATH:-}:" in
+            *":${INSTALL_DIR}/lib:"*) ;;
+            *) export LD_LIBRARY_PATH="${INSTALL_DIR}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" ;;
+        esac
     fi
 
     export SOFTWARE_NAME CATEGORY SOFTWARE_VERSION EXPECTED_ARCH FUNC_OS FUNC_HARDWARE FUNC_MODE
     export PERF_RUN_ID PERF_WORK_DIR RESULTS_DIR PERF_ACTUAL_VERSION_FILE TMPDIR
-    export X264_SOURCE_URL X264_SOURCE_DIR X264_BIN X264_WORK_DIR
+    export X264_ARCHIVE_URL X264_ARCHIVE_SHA256 X264_SOURCE_DIR X264_BIN X264_WORK_DIR
 }
 
 initialize_runtime() {
@@ -148,7 +153,8 @@ install_os_packages() {
     local -a rhel=() debian=()
     for logical in "$@"; do
         case "${logical}" in
-            git) rhel+=(git); debian+=(git) ;;
+            curl|tar|gzip|diffutils|ca-certificates|ffmpeg)
+                rhel+=("${logical}"); debian+=("${logical}") ;;
             python3) rhel+=(python3); debian+=(python3) ;;
             sed) rhel+=(sed); debian+=(sed) ;;
             coreutils) rhel+=(coreutils); debian+=(coreutils) ;;
@@ -181,7 +187,13 @@ install_os_packages() {
 # 克隆源码 / 构建 / 跑 checkasm 所需的命令。
 require_build_commands() {
     local -a logical=()
-    command -v git >/dev/null 2>&1 || logical+=(git)
+    local tool
+    for tool in curl tar gzip; do
+        command -v "${tool}" >/dev/null 2>&1 || logical+=("${tool}")
+    done
+    command -v diff >/dev/null 2>&1 || logical+=(diffutils)
+    command -v sha256sum >/dev/null 2>&1 || logical+=(coreutils)
+    [[ -s /etc/ssl/certs/ca-certificates.crt || -s /etc/pki/tls/certs/ca-bundle.crt ]] || logical+=(ca-certificates)
     command -v python3 >/dev/null 2>&1 || logical+=(python3)
     if ! command -v cc >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
         logical+=(build-tools)
@@ -195,7 +207,7 @@ require_build_commands() {
     install_os_packages "${logical[@]}" || return 30
 }
 
-# 读取 x264 版本号。`x264 --version` 首行形如 "x264 0.165.3223 <hash>"。
+# 读取 x264 版本号。`x264 --version` 首行形如 "x264 0480cb05 <hash>"。
 read_x264_version() {
     local line
     [[ -x "${X264_BIN}" ]] || return 1
@@ -203,23 +215,22 @@ read_x264_version() {
     printf '%s\n' "${line}" | sed -n 's/^x264 \([^ ]*\).*/\1/p'
 }
 
-# 定位可构建(checkasm)的 x264 源码树:目录内必须含 configure 与 Makefile。
+# install 阶段写入，check 在新的 shell 中读取，不能依赖前一阶段 export。
 resolve_x264_source_dir() {
-    local candidate
-    local -a candidates=(
-        "${X264_SOURCE_DIR:-}"
-        "${SOURCE_DIR:-}"
-        "/opt/x264"
-        "/usr/src/x264"
-        "${HOME:-/root}/x264"
-    )
-    for candidate in "${candidates[@]}"; do
-        if [[ -n "${candidate}" && -f "${candidate}/configure" && -f "${candidate}/Makefile" ]]; then
-            printf '%s\n' "${candidate}"
-            return 0
-        fi
-    done
-    return 1
+    local tree
+    [[ -f "${PERF_WORK_DIR}/checkasm-build-dir" ]] || return 1
+    tree="$(cat "${PERF_WORK_DIR}/checkasm-build-dir")"
+    [[ -f "${tree}/Makefile" && -f "${tree}/config.mak" ]] || return 1
+    printf '%s\n' "${tree}"
+}
+
+verify_x264_version() {
+    local actual
+    [[ "${SOFTWARE_VERSION}" == 0480cb05 ]] || return 1
+    actual="$(read_x264_version)" || return 1
+    # 固定归档无 .git，version.sh 输出 0.165.x，提交来源由归档校验保证。
+    [[ "${actual}" == 0.165.x ]] || return 1
+    [[ "$(cat "${PERF_WORK_DIR}/source-sha256.txt" 2>/dev/null)" == "${X264_ARCHIVE_SHA256}" ]]
 }
 
 json_escape() {
