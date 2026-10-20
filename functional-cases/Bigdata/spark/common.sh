@@ -17,6 +17,9 @@ PERF_ACTUAL_VERSION_FILE="${PERF_ACTUAL_VERSION_FILE:-}"
 
 # Spark 是 JVM 应用,官方 pre-built tarball 与架构无关(仅区分 Hadoop 版本)。
 SPARK_RELEASE_URL="${SPARK_RELEASE_URL:-https://archive.apache.org/dist/spark}"
+# 层 1 下载镜像源(空格分隔,按序尝试,接入 PERF_PROXY);
+# SPARK_RELEASE_URL 指向的 archive.apache.org 持有全部历史版本,始终作为最终兜底。
+SPARK_MIRROR_URLS="${SPARK_MIRROR_URLS:-https://mirrors.huaweicloud.com/apache/spark https://downloads.apache.org/dist/spark}"
 SPARK_OFFLINE_DIR="${SPARK_OFFLINE_DIR:-/home/runner/software/spark}"
 # build 模式分层获取(build.sh)用到的三方/源码渠道:
 #   层2 = 三方仓库打包产物(PyPI pyspark,内含完整 Spark 运行时);层3 = 上游源码(最后手段)。
@@ -140,6 +143,37 @@ initialize_runtime() {
     mkdir -p "${RESULTS_DIR}" "${PERF_WORK_DIR}" "${TMPDIR}" "${SPARK_LOCAL_DIRS}"
 }
 
+# ---------- 下载与 Java 环境 ----------
+
+# 统一下载入口:curl 接入 PERF_PROXY(容器内除 dnf/apt 外的下载同样需要走代理)。
+download_file() {
+    local url="$1" dest="$2"
+    local -a opts=(--fail --silent --show-error --location --retry 3 --connect-timeout 30 -o "${dest}")
+    [[ -z "${PERF_PROXY:-}" ]] || opts+=(-x "${PERF_PROXY}")
+    curl "${opts[@]}" "${url}"
+}
+
+# 读取默认 java 的主版本号;java 缺失或输出异常时返回空(不让 set -e 退出)。
+java_major_version() {
+    # java -version 的版本信息走 stderr,必须 2>&1 合并后才可解析。
+    java -version 2>&1 | sed -nE '1s/.*version "([0-9]+).*/\1/p' || true
+}
+
+# prebuilt = 镜像验收:镜像内 Java 与被测 Spark 版本不兼容时按镜像问题上报,不做兜底安装。
+check_image_java_compat() {
+    local major
+    major="$(java_major_version)"
+    case "${SOFTWARE_VERSION}" in
+        4.*)
+            # Spark 4.x 需要 Java 17/21;${major:-0} 兼容 java 缺失/输出异常的情况。
+            if (( ${major:-0} < 17 )); then
+                log "ERROR: image problem: Apache Spark ${SOFTWARE_VERSION} requires Java 17+, but the image provides Java ${major:-unknown}"
+                return 40
+            fi
+            ;;
+    esac
+}
+
 # ---------- OS 感知的依赖安装(build 模式用) ----------
 
 dnf_install() {
@@ -174,6 +208,8 @@ install_os_packages() {
             python3) rhel+=(python3 python3-pip); debian+=(python3 python3-pip) ;;
             download-tools) rhel+=(curl tar gzip); debian+=(curl tar gzip) ;;
             jdk) rhel+=(java-17-openjdk-devel); debian+=(openjdk-17-jdk-headless) ;;
+            git) rhel+=(git); debian+=(git) ;;
+            maven) rhel+=(maven); debian+=(maven) ;;
             *)
                 log "ERROR: unknown logical package: ${logical}"
                 return 30

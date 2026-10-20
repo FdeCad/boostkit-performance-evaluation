@@ -160,16 +160,19 @@ func_check() {
     local version_status="failed" version_detail=""
     local upstream_status="failed" upstream_detail=""
     local smoke_status="failed" smoke_detail=""
-    local actual cluster_up=0
+    local actual version_raw cluster_up=0
 
-    # 1) 版本
-    actual="$("${FLINK_HOME}/bin/flink" --version 2>/dev/null | sed -n 's/^Version: *\([^,]*\).*/\1/p' | head -n 1)"
-    [[ -n "${actual}" ]] || actual="$("${FLINK_HOME}/bin/flink" --version 2>/dev/null | sed -n 's/.*Flink \([0-9][0-9.]*\).*/\1/p' | head -n 1)"
+    # 1) 版本(统一 2>&1 合并输出后解析,避免上游把版本信息改到 stderr 时解析落空)
+    version_raw="$("${FLINK_HOME}/bin/flink" --version 2>&1 || true)"
+    actual="$(printf '%s\n' "${version_raw}" | sed -n 's/^Version: *\([^,]*\).*/\1/p' | head -n 1)"
+    [[ -n "${actual}" ]] || actual="$(printf '%s\n' "${version_raw}" | sed -n 's/.*Flink \([0-9][0-9.]*\).*/\1/p' | head -n 1)"
     if [[ "${actual}" == "${SOFTWARE_VERSION}" ]]; then
         version_status="passed"
         version_detail="version=${actual}"
     else
         version_detail="Apache Flink ${actual:-unknown}, expected ${SOFTWARE_VERSION}"
+        # 保留原始输出片段便于定位镜像/环境问题。
+        version_detail+="; flink --version output: $(printf '%s\n' "${version_raw}" | head -n 3 | tr '\n' ' ' | cut -c1-200)"
     fi
 
     # 2) 本地 standalone mini-cluster(JobManager + TaskManager)

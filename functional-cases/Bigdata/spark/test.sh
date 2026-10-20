@@ -103,15 +103,18 @@ func_check() {
     local version_status="failed" version_detail=""
     local upstream_status="failed" upstream_detail=""
     local smoke_status="failed" smoke_detail=""
-    local actual
+    local actual version_raw
 
-    # 1) 版本
-    actual="$("${SPARK_HOME}/bin/spark-submit" --version 2>/dev/null | sed -n 's/.*[Vv]ersion \([0-9][0-9.]*\).*/\1/p' | head -n 1)"
+    # 1) 版本(spark-submit 的版本信息走 stderr,必须 2>&1 合并后才能解析)
+    version_raw="$("${SPARK_HOME}/bin/spark-submit" --version 2>&1 || true)"
+    actual="$(printf '%s\n' "${version_raw}" | sed -n 's/.*[Vv]ersion \([0-9][0-9.]*\).*/\1/p' | head -n 1)"
     if [[ "${actual}" == "${SOFTWARE_VERSION}" ]]; then
         version_status="passed"
         version_detail="version=${actual}"
     else
         version_detail="Apache Spark ${actual:-unknown}, expected ${SOFTWARE_VERSION}"
+        # 保留原始输出片段便于定位(例如镜像内 Java 过低时会出现 UnsupportedClassVersionError)。
+        version_detail+="; spark-submit --version output: $(printf '%s\n' "${version_raw}" | head -n 3 | tr '\n' ' ' | cut -c1-200)"
     fi
 
     # 2) 上游自带示例(SparkPi)

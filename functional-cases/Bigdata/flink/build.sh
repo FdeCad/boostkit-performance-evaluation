@@ -68,19 +68,30 @@ verify_java_runtime() {
 }
 
 install_flink_distribution() {
-    local archive="${PERF_WORK_DIR}/${FLINK_ARCHIVE_NAME}" actual_sha512 offline_archive
+    local archive="${PERF_WORK_DIR}/${FLINK_ARCHIVE_NAME}" actual_sha512 offline_archive mirror downloaded
 
     offline_archive="${FLINK_OFFLINE_DIR}/${FLINK_ARCHIVE_NAME}"
     if [[ -f "${offline_archive}" ]]; then
         log "using local Apache Flink archive ${offline_archive}"
         install -m 0644 "${offline_archive}" "${archive}" || return 30
     else
-        log "downloading Apache Flink ${SOFTWARE_VERSION} from ${FLINK_RELEASE_URL}"
-        if ! curl -fsSL --retry 3 --connect-timeout 30 -o "${archive}" \
-            "${FLINK_RELEASE_URL}/flink-${SOFTWARE_VERSION}/${FLINK_ARCHIVE_NAME}"; then
-            log "ERROR: failed to download ${FLINK_ARCHIVE_NAME}"
+        # 镜像源按序尝试(走 PERF_PROXY),archive.apache.org 持有全部历史版本作最终兜底。
+        local -a mirrors=()
+        read -ra mirrors <<<"${FLINK_MIRROR_URLS}" || true
+        mirrors+=("${FLINK_RELEASE_URL}")
+        downloaded=0
+        for mirror in "${mirrors[@]}"; do
+            log "downloading Apache Flink ${SOFTWARE_VERSION} from ${mirror}"
+            if download_file "${mirror}/flink-${SOFTWARE_VERSION}/${FLINK_ARCHIVE_NAME}" "${archive}"; then
+                downloaded=1
+                break
+            fi
+            log "download from ${mirror} failed; trying the next mirror"
+        done
+        [[ "${downloaded}" -eq 1 ]] || {
+            log "ERROR: failed to download ${FLINK_ARCHIVE_NAME} from any mirror"
             return 30
-        fi
+        }
     fi
     actual_sha512="$(sha512sum "${archive}" | awk '{print $1}')"
     if [[ "${actual_sha512}" != "${FLINK_ARCHIVE_SHA512}" ]]; then
@@ -106,10 +117,12 @@ install_flink_distribution() {
 
 # 读取当前 FLINK_HOME 里 Flink 的实际版本(读不到时返回非零)。
 flink_installed_version() {
-    local home="${1:-${FLINK_HOME}}" actual
+    local home="${1:-${FLINK_HOME}}" actual raw
     [[ -x "${home}/bin/flink" ]] || return 1
-    actual="$("${home}/bin/flink" --version 2>/dev/null | sed -n 's/^Version: *\([^,]*\).*/\1/p' | head -n 1 || true)"
-    [[ -n "${actual}" ]] || actual="$("${home}/bin/flink" --version 2>/dev/null | sed -n 's/.*Flink \([0-9][0-9.]*\).*/\1/p' | head -n 1 || true)"
+    # 统一 2>&1 合并输出后解析,避免上游把版本信息改到 stderr 时解析落空。
+    raw="$("${home}/bin/flink" --version 2>&1 || true)"
+    actual="$(printf '%s\n' "${raw}" | sed -n 's/^Version: *\([^,]*\).*/\1/p' | head -n 1 || true)"
+    [[ -n "${actual}" ]] || actual="$(printf '%s\n' "${raw}" | sed -n 's/.*Flink \([0-9][0-9.]*\).*/\1/p' | head -n 1 || true)"
     [[ -n "${actual}" ]] || return 1
     printf '%s\n' "${actual}"
 }
@@ -144,16 +157,32 @@ install_flink_from_package() {
     }
     home="$(cd "$(dirname "${home}")/.." && pwd)"
     rm -rf -- "${FLINK_HOME}"
-    mkdir -p "${FLINK_HOME}" || return 30
-    cp -a "${home}/." "${FLINK_HOME}/" || return 30
+    mkdir -p "${FLINK_HOME}" || {
+        log "layer 2: failed to create ${FLINK_HOME}"
+        return 30
+    }
+    if ! cp -a "${home}/." "${FLINK_HOME}/"; then
+        # 失败不再静默:带上磁盘水位,便于判断是不是空间/IO 问题。
+        log "layer 2: failed to copy the packaged Flink into ${FLINK_HOME}; free space: $(df -h "${PERF_WORK_DIR}" 2>/dev/null | tail -n 1 || true)"
+        return 30
+    fi
     chmod +x "${FLINK_HOME}/bin/flink" 2>/dev/null || true
+}
+
+# 层 3 前置:源码编译需要 git 克隆 + Maven 构建;缺失时按发行版安装,不再直接放弃。
+ensure_source_build_tools() {
+    local -a missing=()
+    command -v git >/dev/null 2>&1 || missing+=(git)
+    command -v mvn >/dev/null 2>&1 || missing+=(maven)
+    (( ${#missing[@]} == 0 )) && return 0
+    log "layer 3: installing source build tools: ${missing[*]}"
+    install_os_packages "${missing[@]}" || return 30
 }
 
 # 层 3:源码编译(最后手段)。按 release-<version> 分支克隆上游源码,用 Maven 构建发行版。
 install_flink_from_source() {
     local src="${PERF_WORK_DIR}/flink-src" home
-    command -v git >/dev/null 2>&1 || { log "layer 3: git is required to build Flink from source"; return 30; }
-    command -v mvn >/dev/null 2>&1 || { log "layer 3: Maven is required to build Flink from source"; return 30; }
+    ensure_source_build_tools || return $?
     rm -rf -- "${src}"
     log "layer 3: building Flink ${SOFTWARE_VERSION} from source (${FLINK_SOURCE_URL})"
     if ! GIT_TERMINAL_PROMPT=0 git clone --branch "release-${SOFTWARE_VERSION}" --depth 1 \
@@ -202,10 +231,10 @@ func_install() {
 
     local actual
     if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
-        # 镜像已装好:定位并校验版本,不做任何构建。
+        # 镜像已装好:定位并校验版本,不做任何构建。prebuilt 属于镜像验收,缺软件按镜像问题上报。
         FLINK_HOME="$(resolve_flink_home || true)"
         [[ -n "${FLINK_HOME}" && -x "${FLINK_HOME}/bin/flink" ]] || {
-            log "ERROR: Apache Flink is not present in the software image"
+            log "ERROR: image problem: Apache Flink is not present in the software image"
             return 40
         }
         require_test_commands || return $?
@@ -216,10 +245,14 @@ func_install() {
     fi
 
     actual="$(flink_installed_version || true)"
-    [[ "${actual}" == "${SOFTWARE_VERSION}" ]] || {
+    if [[ "${actual}" != "${SOFTWARE_VERSION}" ]]; then
         log "ERROR: Apache Flink ${actual:-unknown}, expected ${SOFTWARE_VERSION}"
+        # prebuilt 模式把 flink --version 的原始输出留给日志,便于定位镜像问题。
+        if [[ -n "${FLINK_HOME}" && -x "${FLINK_HOME}/bin/flink" ]]; then
+            "${FLINK_HOME}/bin/flink" --version 2>&1 | head -n 20 | sed 's/^/[flink-func]   /' || true
+        fi
         return 40
-    }
+    fi
     mkdir -p "$(dirname "${PERF_ACTUAL_VERSION_FILE}")"
     printf '%s\n' "${actual}" >"${PERF_ACTUAL_VERSION_FILE}" || return 40
     log "Apache Flink ${actual} ready at ${FLINK_HOME} (mode=${FUNC_MODE})"

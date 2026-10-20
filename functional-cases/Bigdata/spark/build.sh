@@ -48,18 +48,33 @@ spark_archive_name() {
 
 verify_java_runtime() {
     local major
-    major="$(java -version 2>&1 | sed -nE '1{s/.*version "([0-9]+).*/\1/p;}')"
-    case "${major}" in
-        8 | 11 | 17) ;;
+    major="$(java_major_version)"
+    case "${SOFTWARE_VERSION}" in
+        4.*)
+            # Spark 4.x 仅支持 Java 17/21。
+            case "${major}" in
+                17 | 21) ;;
+                *)
+                    log "ERROR: Apache Spark ${SOFTWARE_VERSION} requires Java 17/21; found: Java ${major:-unknown}"
+                    return 30
+                    ;;
+            esac
+            ;;
         *)
-            log "ERROR: Apache Spark ${SOFTWARE_VERSION} supports Java 8/11/17; found: $(java -version 2>&1 | head -n 1)"
-            return 30
+            # Spark 3.x 支持 Java 8/11/17。
+            case "${major}" in
+                8 | 11 | 17) ;;
+                *)
+                    log "ERROR: Apache Spark ${SOFTWARE_VERSION} supports Java 8/11/17; found: Java ${major:-unknown}"
+                    return 30
+                    ;;
+            esac
             ;;
     esac
 }
 
 install_spark_distribution() {
-    local archive_name archive offline_archive
+    local archive_name archive offline_archive mirror downloaded
     archive_name="$(spark_archive_name)"
     archive="${PERF_WORK_DIR}/${archive_name}"
     offline_archive="${SPARK_OFFLINE_DIR}/${archive_name}"
@@ -68,12 +83,23 @@ install_spark_distribution() {
         log "using local Apache Spark archive ${offline_archive}"
         install -m 0644 "${offline_archive}" "${archive}" || return 30
     else
-        log "downloading Apache Spark ${SOFTWARE_VERSION} from ${SPARK_RELEASE_URL}"
-        if ! curl -fsSL --retry 3 --connect-timeout 30 -o "${archive}" \
-            "${SPARK_RELEASE_URL}/spark-${SOFTWARE_VERSION}/${archive_name}"; then
-            log "ERROR: failed to download ${archive_name}"
+        # 镜像源按序尝试(走 PERF_PROXY),archive.apache.org 持有全部历史版本作最终兜底。
+        local -a mirrors=()
+        read -ra mirrors <<<"${SPARK_MIRROR_URLS}" || true
+        mirrors+=("${SPARK_RELEASE_URL}")
+        downloaded=0
+        for mirror in "${mirrors[@]}"; do
+            log "downloading Apache Spark ${SOFTWARE_VERSION} from ${mirror}"
+            if download_file "${mirror}/spark-${SOFTWARE_VERSION}/${archive_name}" "${archive}"; then
+                downloaded=1
+                break
+            fi
+            log "download from ${mirror} failed; trying the next mirror"
+        done
+        [[ "${downloaded}" -eq 1 ]] || {
+            log "ERROR: failed to download ${archive_name} from any mirror"
             return 30
-        fi
+        }
     fi
     [[ ! -e "${SPARK_HOME}" ]] || {
         log "ERROR: Spark installation directory is not clean: ${SPARK_HOME}"
@@ -94,9 +120,11 @@ install_spark_distribution() {
 
 # 读取当前 SPARK_HOME 里 Spark 的实际版本(读不到时返回非零)。
 spark_installed_version() {
-    local home="${1:-${SPARK_HOME}}" actual
+    local home="${1:-${SPARK_HOME}}" actual raw
     [[ -x "${home}/bin/spark-submit" ]] || return 1
-    actual="$("${home}/bin/spark-submit" --version 2>/dev/null | sed -n 's/.*[Vv]ersion \([0-9][0-9.]*\).*/\1/p' | head -n 1 || true)"
+    # spark-submit 的版本信息(banner)走 stderr,必须 2>&1 合并后才可解析。
+    raw="$("${home}/bin/spark-submit" --version 2>&1 || true)"
+    actual="$(printf '%s\n' "${raw}" | sed -n 's/.*[Vv]ersion \([0-9][0-9.]*\).*/\1/p' | head -n 1 || true)"
     [[ -n "${actual}" ]] || return 1
     printf '%s\n' "${actual}"
 }
@@ -130,16 +158,32 @@ install_spark_from_package() {
         return 30
     }
     rm -rf -- "${SPARK_HOME}"
-    mkdir -p "${SPARK_HOME}" || return 30
-    cp -a "${home}/." "${SPARK_HOME}/" || return 30
+    mkdir -p "${SPARK_HOME}" || {
+        log "layer 2: failed to create ${SPARK_HOME}"
+        return 30
+    }
+    if ! cp -a "${home}/." "${SPARK_HOME}/"; then
+        # 失败不再静默:带上磁盘水位,便于判断是不是空间/IO 问题。
+        log "layer 2: failed to copy the packaged Spark into ${SPARK_HOME}; free space: $(df -h "${PERF_WORK_DIR}" 2>/dev/null | tail -n 1 || true)"
+        return 30
+    fi
     chmod +x "${SPARK_HOME}/bin/spark-submit" 2>/dev/null || true
+}
+
+# 层 3 前置:源码编译需要 git 克隆 + Maven 构建;缺失时按发行版安装,不再直接放弃。
+ensure_source_build_tools() {
+    local -a missing=()
+    command -v git >/dev/null 2>&1 || missing+=(git)
+    command -v mvn >/dev/null 2>&1 || missing+=(maven)
+    (( ${#missing[@]} == 0 )) && return 0
+    log "layer 3: installing source build tools: ${missing[*]}"
+    install_os_packages "${missing[@]}" || return 30
 }
 
 # 层 3:源码编译(最后手段)。按 v<version> tag 克隆上游源码,用自带的 make-distribution 打包。
 install_spark_from_source() {
     local src="${PERF_WORK_DIR}/spark-src" tgz
-    command -v git >/dev/null 2>&1 || { log "layer 3: git is required to build Spark from source"; return 30; }
-    command -v tar >/dev/null 2>&1 || { log "layer 3: tar is required to build Spark from source"; return 30; }
+    ensure_source_build_tools || return $?
     rm -rf -- "${src}"
     log "layer 3: building Spark ${SOFTWARE_VERSION} from source (${SPARK_SOURCE_URL})"
     if ! GIT_TERMINAL_PROMPT=0 git clone --branch "v${SOFTWARE_VERSION}" --depth 1 \
@@ -191,13 +235,15 @@ func_install() {
 
     local actual
     if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
-        # 镜像已装好:定位并校验版本,不做任何构建。
+        # 镜像已装好:定位并校验版本,不做任何构建。prebuilt 属于镜像验收,
+        # 镜像内缺软件或 Java 版本不兼容都按镜像问题上报,不做兜底安装。
         SPARK_HOME="$(resolve_spark_home || true)"
         [[ -n "${SPARK_HOME}" && -x "${SPARK_HOME}/bin/spark-submit" ]] || {
-            log "ERROR: Apache Spark is not present in the software image"
+            log "ERROR: image problem: Apache Spark is not present in the software image"
             return 40
         }
         require_test_commands || return $?
+        check_image_java_compat || return $?
     else
         require_build_commands || return $?
         verify_java_runtime || return $?
@@ -205,10 +251,14 @@ func_install() {
     fi
 
     actual="$(spark_installed_version || true)"
-    [[ "${actual}" == "${SOFTWARE_VERSION}" ]] || {
+    if [[ "${actual}" != "${SOFTWARE_VERSION}" ]]; then
         log "ERROR: Apache Spark ${actual:-unknown}, expected ${SOFTWARE_VERSION}"
+        # prebuilt 模式把 spark-submit 的原始输出留给日志,便于定位镜像问题。
+        if [[ -n "${SPARK_HOME}" && -x "${SPARK_HOME}/bin/spark-submit" ]]; then
+            "${SPARK_HOME}/bin/spark-submit" --version 2>&1 | head -n 20 | sed 's/^/[spark-func]   /' || true
+        fi
         return 40
-    }
+    fi
     mkdir -p "$(dirname "${PERF_ACTUAL_VERSION_FILE}")"
     printf '%s\n' "${actual}" >"${PERF_ACTUAL_VERSION_FILE}" || return 40
     log "Apache Spark ${actual} ready at ${SPARK_HOME} (mode=${FUNC_MODE})"

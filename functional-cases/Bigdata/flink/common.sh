@@ -17,6 +17,9 @@ PERF_ACTUAL_VERSION_FILE="${PERF_ACTUAL_VERSION_FILE:-}"
 
 # Flink 是 JVM 应用,官方 tarball 与架构无关(统一 scala_2.12 发行版)。
 FLINK_RELEASE_URL="${FLINK_RELEASE_URL:-https://archive.apache.org/dist/flink}"
+# 层 1 下载镜像源(空格分隔,按序尝试,接入 PERF_PROXY);
+# FLINK_RELEASE_URL 指向的 archive.apache.org 持有全部历史版本,始终作为最终兜底。
+FLINK_MIRROR_URLS="${FLINK_MIRROR_URLS:-https://mirrors.huaweicloud.com/apache/flink https://downloads.apache.org/flink}"
 FLINK_OFFLINE_DIR="${FLINK_OFFLINE_DIR:-/home/runner/software/flink}"
 # build 模式分层获取(build.sh)用到的三方/源码渠道:
 #   层2 = 三方仓库打包产物(PyPI apache-flink);层3 = 上游源码(最后手段)。
@@ -158,6 +161,16 @@ initialize_runtime() {
     mkdir -p "${RESULTS_DIR}" "${PERF_WORK_DIR}" "${TMPDIR}" "${FLINK_RUNTIME_DIR}"
 }
 
+# ---------- 下载 ----------
+
+# 统一下载入口:curl 接入 PERF_PROXY(容器内除 dnf/apt 外的下载同样需要走代理)。
+download_file() {
+    local url="$1" dest="$2"
+    local -a opts=(--fail --silent --show-error --location --retry 3 --connect-timeout 30 -o "${dest}")
+    [[ -z "${PERF_PROXY:-}" ]] || opts+=(-x "${PERF_PROXY}")
+    curl "${opts[@]}" "${url}"
+}
+
 # ---------- OS 感知的依赖安装(build 模式用) ----------
 
 dnf_install() {
@@ -192,6 +205,8 @@ install_os_packages() {
             python3) rhel+=(python3); debian+=(python3) ;;
             download-tools) rhel+=(curl tar gzip); debian+=(curl tar gzip) ;;
             jdk) rhel+=(java-17-openjdk-devel); debian+=(openjdk-17-jdk-headless) ;;
+            git) rhel+=(git); debian+=(git) ;;
+            maven) rhel+=(maven); debian+=(maven) ;;
             *)
                 log "ERROR: unknown logical package: ${logical}"
                 return 30
