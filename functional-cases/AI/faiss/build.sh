@@ -132,12 +132,20 @@ fetch_faiss_upstream_binary() {
 # 改用等价的预编译 PyPI wheel faiss-cpu(第三方打包的官方 CPU 产物),
 # 强制 --only-binary=:all: 以确保拿到二进制而非现场编译源码包。
 # wheel 有 cpXX ABI 约束,venv 的 CPython 版本已由 create_faiss_venv 按 wheel 标签选定。
+# 老版本 wheel 的元数据会漏声明运行期依赖(faiss 1.8.0 的 loader.py 要 import packaging,
+# 元数据里没有;numpy 也没写上限,会拉到与 1.x 扩展不兼容的 numpy 2.x,上游事后以
+# 1.8.0.post1 补齐了这两项),所以由这里显式补上,pip 对已声明的版本重复指定无副作用。
 fetch_faiss_third_party() {
-    local -a index_args=()
+    local -a index_args=() extra=(packaging)
+    local major minor
     mapfile -t index_args < <(pip_index_args)
-    log "layer 2: installing the equivalent prebuilt wheel ${FAISS_PACKAGE_SPEC} (python ${FAISS_PYTHON_VERSION})"
+    IFS='.' read -r major minor _ <<<"${SOFTWARE_VERSION}"
+    if [[ "${major}" == "1" && "${minor}" -lt 9 ]]; then
+        extra+=("numpy<2")
+    fi
+    log "layer 2: installing the equivalent prebuilt wheel ${FAISS_PACKAGE_SPEC} (python ${FAISS_PYTHON_VERSION}, extra: ${extra[*]})"
     "${VENV_DIR}/bin/pip" install --no-cache-dir --disable-pip-version-check \
-        "${index_args[@]}" --only-binary=:all: "${FAISS_PACKAGE_SPEC}"
+        "${index_args[@]}" --only-binary=:all: "${FAISS_PACKAGE_SPEC}" "${extra[@]}"
 }
 
 # 层 3:源码编译(最后手段)。
