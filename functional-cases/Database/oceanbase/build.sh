@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # OceanBase 构建脚本:环境采集 + 准备被测软件(分层获取 observer 或校验镜像)。
-#   FUNC_MODE=prebuilt - 镜像内已有就绪 observer:直接复用并校验版本
+#   FUNC_MODE=prebuilt - 镜像内已装好 observer:启动镜像自带实例(2881)并校验版本
 #   FUNC_MODE=build    - 分层优先获取:官方二进制(obd 拉包)→ 三方仓库 → 源码编译
 # 暴露给 Framework 的阶段:prepare、install。独立执行时依次运行这两个阶段。
 set -euo pipefail
@@ -116,13 +116,10 @@ func_install() {
 
     local actual=""
     if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
-        # 镜像内应已存在就绪 observer:直接复用并校验版本。
-        if check_observer_ready; then
-            log "an OceanBase observer is already reachable on ${OB_HOST}:${OB_PORT}; reusing it"
-        else
-            deploy_with_obd || return $?
-            wait_observer_ready 120 || return $?
-        fi
+        # 镜像内已装好 observer 与启动脚本(不含 obd):启动镜像自带实例并复用,
+        # 直接按镜像默认端口 2881 连接,不联网拉包、不走 obd 部署。
+        start_image_observer || return $?
+        wait_observer_ready 120 || return $?
     else
         # 分层优先获取(build 模式):官方二进制(obd)→ 三方仓库 → 源码编译。
         acquire_oceanbase_build || return $?

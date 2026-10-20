@@ -37,6 +37,9 @@ OBD_HOME=""
 STANDALONE_OWNS_WORK_DIR=0
 STANDALONE_KEEP_WORK_DIR=0
 
+# 预构建镜像内 observer 的启动脚本:由 oceanbase-ce rpm 安装,镜像 CMD 亦调用它。
+OB_IMAGE_SERVICE_SCRIPT="/home/admin/oceanbase/profile/oceanbase-service.sh"
+
 log() { printf '[oceanbase-func] %s\n' "$*"; }
 
 normalize_arch() {
@@ -102,18 +105,27 @@ configure_runtime_paths() {
     if [[ -z "${FUNC_OS}" ]]; then
         FUNC_OS="$(detect_os_label)"
     fi
-    # 端口由 run_id 派生,保证任务隔离,不复用已有 observer。
+    # 端口:build 模式由 run_id 派生以隔离并发任务;prebuilt 模式的 observer 由镜像内
+    # oceanbase-service.sh 按自身配置固定监听 2881/2882,必须对齐镜像端口才能连上。
     local checksum
     if [[ -z "${OB_PORT}" ]]; then
-        checksum="$(printf '%s' "${PERF_RUN_ID}" | cksum)"
-        OB_PORT="$((20000 + ${checksum%% *} % 20000))"
+        if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
+            OB_PORT=2881
+        else
+            checksum="$(printf '%s' "${PERF_RUN_ID}" | cksum)"
+            OB_PORT="$((20000 + ${checksum%% *} % 20000))"
+        fi
     fi
     [[ "${OB_PORT}" =~ ^[0-9]+$ ]] && ((OB_PORT >= 1024 && OB_PORT <= 65535)) || {
         log "ERROR: invalid OB_PORT: ${OB_PORT}"
         return 10
     }
     if [[ -z "${OB_RPC_PORT}" ]]; then
-        OB_RPC_PORT="$((OB_PORT + 20000))"
+        if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
+            OB_RPC_PORT=2882
+        else
+            OB_RPC_PORT="$((OB_PORT + 20000))"
+        fi
     fi
     ((OB_RPC_PORT <= 65535)) || {
         log "ERROR: invalid OB_RPC_PORT: ${OB_RPC_PORT}"
@@ -175,6 +187,25 @@ wait_observer_ready() {
     return 40
 }
 
+# prebuilt 模式:镜像内已装好 observer(obd 不在镜像内),直接启动镜像自带实例并复用,
+# 不联网从 OceanBase 官方仓库拉包,也不受 LSE/non-LSE 变体选择影响。
+start_image_observer() {
+    if check_observer_ready; then
+        log "an OceanBase observer is already reachable on ${OB_HOST}:${OB_PORT}; reusing it"
+        return 0
+    fi
+    [[ -f "${OB_IMAGE_SERVICE_SCRIPT}" ]] || {
+        log "ERROR: the prebuilt image does not ship ${OB_IMAGE_SERVICE_SCRIPT}"
+        return 30
+    }
+    log "starting the observer bundled in the prebuilt image (${OB_IMAGE_SERVICE_SCRIPT})"
+    bash "${OB_IMAGE_SERVICE_SCRIPT}" start || {
+        log "ERROR: failed to start the observer bundled in the prebuilt image"
+        return 40
+    }
+    return 0
+}
+
 # ---------- OS 感知的依赖安装 ----------
 
 dnf_install() {
@@ -218,10 +249,27 @@ write_oceanbase_repo() {
 }
 
 # Ubuntu/Debian 无法用 rpm 源,改由 pip 安装官方 oceanbase-deploy(obd)。
+# 系统 Python 受 PEP 668 保护(externally-managed-environment),直接 pip3 install 会被
+# 拒绝;改在任务私有 venv 中安装部署器,不动系统 Python 也不装到系统路径。
 install_obd_debian() {
-    command -v pip3 >/dev/null 2>&1 || apt_install python3-pip || return 30
-    log "installing obd via pip (oceanbase-deploy)"
-    pip3 install --no-input oceanbase-deploy || return 30
+    local venv="${PERF_WORK_DIR}/obd-venv"
+    if [[ -x "${venv}/bin/obd" ]]; then
+        export PATH="${venv}/bin:${PATH}"
+        return 0
+    fi
+    log "installing obd (oceanbase-deploy) into the task-private venv ${venv}"
+    if ! python3 -m venv "${venv}" >/dev/null 2>&1; then
+        # Debian/Ubuntu 把 venv 模块单独打包在 python3-venv 中,默认不随 python3 安装。
+        rm -rf -- "${venv}"
+        apt_install python3-venv || return 30
+        python3 -m venv "${venv}" || return 30
+    fi
+    "${venv}/bin/pip" install --no-input oceanbase-deploy || return 30
+    export PATH="${venv}/bin:${PATH}"
+    command -v obd >/dev/null 2>&1 || {
+        log "ERROR: obd is unusable after installing oceanbase-deploy into ${venv}"
+        return 30
+    }
 }
 
 install_oceanbase_dependencies() {
@@ -244,7 +292,9 @@ install_oceanbase_dependencies() {
 
     case "${family}" in
         rhel)
-            if ! command -v obd >/dev/null 2>&1 && ! rpm -q ob-deploy >/dev/null 2>&1; then
+            # prebuilt 镜像内已有 observer、且不含 obd,无需也不应安装部署器。
+            if [[ "${FUNC_MODE}" != "prebuilt" ]] &&
+                ! command -v obd >/dev/null 2>&1 && ! rpm -q ob-deploy >/dev/null 2>&1; then
                 write_oceanbase_repo || {
                     log "ERROR: cannot configure the OceanBase package repository"
                     return 30
@@ -257,7 +307,7 @@ install_oceanbase_dependencies() {
             ;;
         debian)
             (( ${#packages[@]} > 0 )) && { apt_install "${packages[@]}" || return 30; }
-            if ! command -v obd >/dev/null 2>&1; then
+            if [[ "${FUNC_MODE}" != "prebuilt" ]] && ! command -v obd >/dev/null 2>&1; then
                 install_obd_debian || {
                     log "ERROR: could not obtain obd; OceanBase deployment requires the deployer"
                     return 30
