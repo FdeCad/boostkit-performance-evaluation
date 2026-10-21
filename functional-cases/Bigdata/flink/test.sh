@@ -11,8 +11,22 @@ source "${SCRIPT_DIR}/common.sh"
 # ---------- 阶段:check ----------
 
 write_flink_configuration() {
+    local conf_file
+    # Flink 2.0 起改用新配置文件 conf/config.yaml;1.x 只读 conf/flink-conf.yaml,
+    # 写错文件名时所有配置(端口、内存)会被静默忽略,REST 不会在指定端口就绪。
+    # 两个文件同为扁平 key: value 格式,内容可复用。
+    local major="${SOFTWARE_VERSION%%.*}"
+    if [[ "${major}" -lt 2 ]]; then
+        conf_file="${FLINK_HOME}/conf/flink-conf.yaml"
+    else
+        conf_file="${FLINK_HOME}/conf/config.yaml"
+    fi
     mkdir -p "${FLINK_RUNTIME_DIR}/logs" "${FLINK_RUNTIME_DIR}/pids"
-    cat >"${FLINK_HOME}/conf/config.yaml" <<EOF
+    # env.java.opts.all:JDK 17+ 强封装下必须显式 --add-opens,否则 client 端(如 2.3.0
+    # WordCount 的 DataStream V2 初始化)反射 java.util 内部字段会抛
+    # InaccessibleObjectException。上游 bin/config.sh 会前置 -XX:+IgnoreUnrecognizedVMOptions,
+    # Java 8/11 上这些参数被忽略,写入无害。
+    cat >"${conf_file}" <<EOF
 jobmanager.rpc.address: 127.0.0.1
 jobmanager.bind-host: 127.0.0.1
 jobmanager.rpc.port: ${FLINK_RPC_PORT}
@@ -30,6 +44,7 @@ taskmanager.memory.process.size: 1024m
 io.tmp.dirs: ${TMPDIR}
 env.log.dir: ${FLINK_RUNTIME_DIR}/logs
 env.pid.dir: ${FLINK_RUNTIME_DIR}/pids
+env.java.opts.all: --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED
 EOF
 }
 

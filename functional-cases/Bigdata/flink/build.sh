@@ -44,6 +44,16 @@ EOF
 # 声明每个受支持版本对应的官方发行包名与 SHA-512(与 software/Bigdata/flink 保持一致)。
 flink_archive_for_version() {
     case "${SOFTWARE_VERSION}" in
+        1.16.3)
+            FLINK_ARCHIVE_NAME="flink-1.16.3-bin-scala_2.12.tgz"
+            # SHA-512 取自 archive.apache.org/dist/flink/flink-1.16.3/*.sha512
+            FLINK_ARCHIVE_SHA512="12c4333b3589bfe0ba9e2c394c1f71683d932c7733deba12d08dbf9cff6d4fd1cb3a3d08177b2382bccf6287637a224fb7ed0e612502a37efcd4b5520c275082"
+            ;;
+        1.17.1)
+            FLINK_ARCHIVE_NAME="flink-1.17.1-bin-scala_2.12.tgz"
+            # SHA-512 取自 archive.apache.org/dist/flink/flink-1.17.1/*.sha512
+            FLINK_ARCHIVE_SHA512="e4a0318a730c46bdf134e5fa071b7b01c634e7f2f131fe7f6fd44e8cff573f48497c2f1deaa9508f12cc2ab0ebb23564acb6f2dacbb4bd61ff2527cad3abe129"
+            ;;
         2.3.0)
             FLINK_ARCHIVE_NAME="flink-2.3.0-bin-scala_2.12.tgz"
             FLINK_ARCHIVE_SHA512="e5863767caeaa7c72e45fc62d45f7df9f435a1c83aed813ea550db39e9221194d148ea4a6c3bfb5604335974729c579d48c6c4c3eb43502e37310a0bf982462a"
