@@ -46,6 +46,38 @@ kubectl_arch() {
     esac
 }
 
+# 预构建镜像里的 kubectl 不一定在 PATH 上,可能留在源码树的构建产物目录,
+# 因此先查 PATH,再按镜像内常见的安装位置逐级探测。
+resolve_prebuilt_kubectl() {
+    local candidate
+    candidate="$(command -v kubectl 2>/dev/null || true)"
+    if [[ -n "${candidate}" ]]; then
+        printf '%s\n' "${candidate}"
+        return 0
+    fi
+    for candidate in \
+        /usr/local/bin/kubectl \
+        /usr/bin/kubectl \
+        /opt/kubernetes/bin/kubectl \
+        /usr/local/kubernetes-${SOFTWARE_VERSION}/_output/bin/kubectl \
+        /usr/local/kubernetes-${SOFTWARE_VERSION}/_output/local/bin/linux/*/kubectl \
+        /usr/local/kubernetes-${SOFTWARE_VERSION}/_output/dockerized/bin/linux/*/kubectl \
+        /usr/local/kubernetes-*/_output/bin/kubectl \
+        /usr/local/kubernetes-*/server/bin/kubectl; do
+        if [[ -x "${candidate}" ]]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+    # 兜底:构建产物层级不固定时按文件名查找。
+    candidate="$(find /usr/local /opt -maxdepth 6 -type f -name kubectl 2>/dev/null | head -n 1 || true)"
+    if [[ -n "${candidate}" ]]; then
+        printf '%s\n' "${candidate}"
+        return 0
+    fi
+    printf '/usr/local/bin/kubectl\n'
+}
+
 os_id() {
     sed -n 's/^ID=//p' /etc/os-release 2>/dev/null | head -n 1 | tr -d '"' | tr 'A-Z' 'a-z'
 }
@@ -105,10 +137,7 @@ configure_runtime_paths() {
     INSTALL_DIR="${PERF_WORK_DIR}/kubectl-install"
     KUBECTL_WORK_DIR="${PERF_WORK_DIR}/kubectl"
     if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
-        local path
-        path="$(command -v kubectl 2>/dev/null || true)"
-        [[ -n "${path}" ]] || path="/usr/local/bin/kubectl"
-        KUBECTL_BIN="${path}"
+        KUBECTL_BIN="$(resolve_prebuilt_kubectl)"
     else
         KUBECTL_BIN="${INSTALL_DIR}/kubectl"
     fi

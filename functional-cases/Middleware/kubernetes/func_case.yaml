@@ -32,12 +32,12 @@ execution:
 checks:
   - name: version
     description: kubectl version --client 的客户端版本必须等于请求版本
-  # 上游客户端功能:对内置 YAML 执行 apply --dry-run=client(无需真实集群)。
+  # 上游客户端功能:用 kubectl 内建生成器离线渲染 Deployment(不访问 API server)。
   - name: upstream-test
-    description: 用 kubectl apply --dry-run=client 校验一段内置 YAML
-    upstream_command: kubectl apply --dry-run=client -f manifest.yaml
+    description: 用 kubectl create deployment --dry-run=client 离线渲染 Deployment 并校验字段
+    upstream_command: kubectl create deployment func-smoke --image=nginx:alpine --dry-run=client -o yaml
   - name: kubectl-smoke
-    description: kubectl create 生成资源 YAML 后再用 apply --dry-run=client 回喂校验
+    description: kubectl create 离线渲染 ConfigMap 与 Job 的 YAML 并校验类型和名称
 
 outputs:
   functional_result:

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Kubernetes 测试脚本:功能判定 + 收尾。
-# 判定:版本校验 + kubectl 客户端侧 YAML 校验(apply --dry-run=client) + 内置资源生成 smoke。
-# 无需真实集群:全部使用 client 侧 dry-run。
+# 判定:版本校验 + kubectl 离线生成 Deployment + 内建资源生成 smoke。
+# 无需真实集群:只使用完全在本地构造对象的 kubectl create 生成器,不触发 API discovery。
 # 暴露给 Framework 的阶段:check、cleanup。独立执行时依次运行这两个阶段。
 set -euo pipefail
 
@@ -11,56 +11,30 @@ source "${SCRIPT_DIR}/common.sh"
 
 # ---------- 阶段:check ----------
 
-# 写出一段内置 YAML(Deployment + Service),用于 client 侧 dry-run 校验。
-write_manifest() {
+# 上游客户端功能:用 kubectl 内建生成器离线渲染 Deployment 并校验关键字段。
+# 注意:apply/create -f 的 --dry-run=client 仍需要 API discovery,没有集群时会
+# 回落到 localhost:8080,因此这里只用完全在本地构造对象的生成器命令。
+run_upstream_generate() {
+    local generated="${KUBECTL_WORK_DIR}/deployment.yaml"
     mkdir -p "${KUBECTL_WORK_DIR}" || return 40
-    cat >"${KUBECTL_WORK_DIR}/manifest.yaml" <<'YAML'
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: func-smoke
-  namespace: default
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: func-smoke
-  template:
-    metadata:
-      labels:
-        app: func-smoke
-    spec:
-      containers:
-        - name: app
-          image: nginx:alpine
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: func-smoke
-  namespace: default
-spec:
-  selector:
-    app: func-smoke
-  ports:
-    - port: 80
-      targetPort: 80
-YAML
+    "${KUBECTL_BIN}" create deployment func-smoke \
+        --image=nginx:alpine --dry-run=client -o yaml >"${generated}" || return 40
+    grep -q 'kind: Deployment' "${generated}" || return 41
+    grep -q 'name: func-smoke' "${generated}" || return 41
+    grep -q 'image: nginx:alpine' "${generated}" || return 41
 }
 
-# 上游客户端功能:对内置 YAML 做 client 侧 schema/对象校验。
-run_apply_dry_run() {
-    "${KUBECTL_BIN}" apply --dry-run=client --validate=false \
-        -f "${KUBECTL_WORK_DIR}/manifest.yaml"
-}
-
-# 基础 smoke:用 kubectl create 生成资源 YAML,再回喂 apply 做 client 侧校验。
+# 基础 smoke:用 kubectl create 生成 ConfigMap 与 Job 的 YAML,校验类型与名称。
 run_kubectl_smoke() {
     local generated="${KUBECTL_WORK_DIR}/generated.yaml"
     "${KUBECTL_BIN}" create configmap func-smoke \
         --from-literal=key=value --dry-run=client -o yaml >"${generated}" || return 40
-    grep -q 'name: func-smoke' "${generated}" || return 40
-    "${KUBECTL_BIN}" apply --dry-run=client --validate=false -f "${generated}"
+    grep -q 'kind: ConfigMap' "${generated}" || return 41
+    grep -q 'name: func-smoke' "${generated}" || return 41
+    "${KUBECTL_BIN}" create job func-smoke \
+        --image=busybox --dry-run=client -o yaml >"${generated}" || return 40
+    grep -q 'kind: Job' "${generated}" || return 41
+    grep -q 'name: func-smoke' "${generated}" || return 41
 }
 
 write_functional_result() {
@@ -103,7 +77,6 @@ func_check() {
         log "ERROR: kubectl client is unavailable"
         return 40
     }
-    write_manifest || return $?
 
     local version_status="failed" version_detail=""
     local upstream_status="failed" upstream_detail=""
@@ -119,20 +92,20 @@ func_check() {
         version_detail="kubectl client ${actual:-unknown}, expected ${SOFTWARE_VERSION}"
     fi
 
-    # 2) 上游客户端功能:apply --dry-run=client
-    if run_apply_dry_run >"${RESULTS_DIR}/upstream_apply.log" 2>&1; then
+    # 2) 上游客户端功能:离线渲染 Deployment
+    if run_upstream_generate >"${RESULTS_DIR}/upstream_generate.log" 2>&1; then
         upstream_status="passed"
-        upstream_detail="kubectl apply --dry-run=client validated the built-in manifest"
+        upstream_detail="kubectl create deployment --dry-run=client rendered a valid manifest"
     else
-        upstream_detail="kubectl apply --dry-run=client failed; see upstream_apply.log"
+        upstream_detail="kubectl create deployment --dry-run=client failed; see upstream_generate.log"
     fi
 
-    # 3) 基础 smoke:create -> apply 回喂
+    # 3) 基础 smoke:ConfigMap + Job 生成
     if run_kubectl_smoke >"${RESULTS_DIR}/kubectl_smoke.log" 2>&1; then
         smoke_status="passed"
-        smoke_detail="kubectl create + apply --dry-run=client roundtrip ok"
+        smoke_detail="kubectl create rendered ConfigMap and Job manifests"
     else
-        smoke_detail="kubectl create/apply smoke failed; see kubectl_smoke.log"
+        smoke_detail="kubectl create smoke failed; see kubectl_smoke.log"
     fi
 
     local overall="passed"
