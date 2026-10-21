@@ -95,14 +95,64 @@ resolve_c_compiler() {
     return 0
 }
 
+# glibc 版本串归一化:去掉空白与末尾句点。
+# ld.so 输出形如 "stable release version 2.43.",直接截取会带上句点。
+normalize_version() {
+    printf '%s' "${1:-}" | tr -d ' \t\r\n' | sed 's/\.*$//'
+}
+
 # 从动态加载器版本输出解析 glibc 版本(... release version 2.31 ...)。
 loader_version_of() {
-    "$1" --version 2>&1 | sed -n 's/.*release version \([0-9][0-9.]*\).*/\1/p' | head -n 1 || true
+    local raw
+    raw="$("$1" --version 2>&1 | sed -n 's/.*release version \([0-9][0-9.]*\).*/\1/p' | head -n 1 || true)"
+    normalize_version "${raw}"
+}
+
+# 在给定前缀下查找动态加载器。只用 shell 通配,不依赖 find:
+# 预构建镜像常被裁剪(findutils 可能缺失),find 缺失会让探测静默失败。
+loader_under_prefix() {
+    local prefix="$1" dir candidate
+    local -a dirs=(
+        "${prefix}/lib"
+        "${prefix}/lib64"
+        "${prefix}/lib32"
+        "${prefix}"
+    )
+    for dir in "${dirs[@]}"; do
+        [[ -d "${dir}" ]] || continue
+        for candidate in "${dir}"/ld-linux-*.so.* "${dir}"/ld-*.so.*; do
+            [[ -e "${candidate}" ]] || continue
+            printf '%s\n' "${candidate}"
+            return 0
+        done
+    done
+    return 0
+}
+
+# 系统 glibc 的动态加载器(镜像/发行版自带的 glibc 即被测对象时)。
+system_glibc_loader() {
+    local dir candidate
+    for dir in /lib /lib64 /usr/lib /usr/lib64; do
+        [[ -d "${dir}" ]] || continue
+        for candidate in "${dir}"/ld-linux-*.so.* "${dir}"/ld-*.so.*; do
+            [[ -e "${candidate}" ]] || continue
+            printf '%s\n' "${candidate}"
+            return 0
+        done
+    done
+    return 0
+}
+
+# 加载器所在库目录。解引用符号链接:Ubuntu arm64 的 /lib/ld-linux-aarch64.so.1
+# 指向 /lib/aarch64-linux-gnu/,直接用 dirname 会得到错误的多架构库路径。
+loader_lib_dir() {
+    local resolved
+    resolved="$(readlink -f "$1" 2>/dev/null || printf '%s' "$1")"
+    dirname "${resolved}"
 }
 
 # prebuilt 模式下定位镜像内 glibc 的动态加载器(优先私有前缀)。
-# 预构建镜像的安装前缀是 /usr/local/glibc(Dockerfile configure --prefix),
-# 因此显式列出该前缀;再用 /usr/local、/opt 兜底未知前缀。
+# 预构建镜像的安装前缀是 /usr/local/glibc(Dockerfile configure --prefix)。
 resolve_prebuilt_glibc_loader() {
     local root loader version fallback=""
     local -a roots=(
@@ -117,7 +167,7 @@ resolve_prebuilt_glibc_loader() {
     )
     for root in "${roots[@]}"; do
         [[ -n "${root}" && -d "${root}" ]] || continue
-        loader="$(find "${root}" -maxdepth 3 -name 'ld-linux-*.so.*' -print -quit 2>/dev/null || true)"
+        loader="$(loader_under_prefix "${root}")"
         [[ -n "${loader}" ]] || continue
         [[ -n "${fallback}" ]] || fallback="${loader}"
         version="$(loader_version_of "${loader}")"
@@ -130,22 +180,26 @@ resolve_prebuilt_glibc_loader() {
         printf '%s\n' "${fallback}"
     else
         # 回退:系统动态加载器(镜像的系统 glibc 即被测对象时)。
-        find /lib /lib64 /usr/lib /usr/lib64 -maxdepth 1 -name 'ld-linux-*.so.*' -print -quit 2>/dev/null || true
+        system_glibc_loader
     fi
     return 0
 }
 
 # 读取被测 glibc 版本:build 模式优先用本次构建的 ldconfig,否则用加载器或系统 ldd。
 glibc_version() {
+    local raw=""
     if [[ -n "${LDCONFIG_BIN}" && -x "${LDCONFIG_BIN}" ]]; then
-        "${LDCONFIG_BIN}" --version 2>/dev/null | head -n 1 | awk '{print $NF}' || true
+        raw="$("${LDCONFIG_BIN}" --version 2>/dev/null | head -n 1 || true)"
     elif [[ -n "${GLIBC_LOADER}" && -x "${GLIBC_LOADER}" ]]; then
         loader_version_of "${GLIBC_LOADER}"
+        return 0
     elif command -v ldd >/dev/null 2>&1; then
-        ldd --version 2>&1 | head -n 1 | awk '{print $NF}' || true
+        raw="$(ldd --version 2>&1 | head -n 1 || true)"
     else
         return 1
     fi
+    # 版本号是首行的最后一个字段,用参数展开取词,避免依赖 awk。
+    normalize_version "${raw##* }"
 }
 
 # 被测 glibc 私有前缀自带的 getconf(前缀/bin/getconf);系统 glibc 为被测对象时为空。
@@ -190,7 +244,7 @@ configure_runtime_paths() {
         LDCONFIG_BIN=""
         GLIBC_LOADER="$(resolve_prebuilt_glibc_loader || true)"
         if [[ -n "${GLIBC_LOADER}" ]]; then
-            GLIBC_LIB_DIR="$(dirname "${GLIBC_LOADER}")"
+            GLIBC_LIB_DIR="$(loader_lib_dir "${GLIBC_LOADER}")"
         else
             GLIBC_LIB_DIR=""
         fi
@@ -200,7 +254,7 @@ configure_runtime_paths() {
         GLIBC_LIB_DIR="${INSTALL_DIR}/lib"
         GLIBC_LOADER=""
         if [[ -d "${GLIBC_LIB_DIR}" ]]; then
-            GLIBC_LOADER="$(find "${GLIBC_LIB_DIR}" -maxdepth 1 -name 'ld-linux-*.so.*' -print -quit 2>/dev/null || true)"
+            GLIBC_LOADER="$(loader_under_prefix "${INSTALL_DIR}" || true)"
         fi
         # 分层获取(install 阶段)若 layer2 采用发行版仓库包的系统 glibc,则改用其路径。
         if [[ -s "${LAYERED_TOOL_FILE}" ]]; then
@@ -270,6 +324,7 @@ install_os_packages() {
             build-tools) rhel+=(gcc gcc-c++ make); debian+=(build-essential) ;;
             bison) rhel+=(bison); debian+=(bison) ;;
             gawk) rhel+=(gawk); debian+=(gawk) ;;
+            python) rhel+=(python3); debian+=(python3) ;;
             patch) rhel+=(patch); debian+=(patch) ;;
             getconf) rhel+=(glibc-common); debian+=(libc-bin) ;;
             *)
@@ -298,12 +353,14 @@ install_os_packages() {
 
 require_build_commands() {
     local missing=0 command_name
-    for command_name in curl tar xz make sha256sum gcc awk bison patch nproc; do
+    # glibc 2.41 起源码构建必须有 python3,缺失时 configure 直接报
+    # "These critical programs are missing or too old: python"。
+    for command_name in curl tar xz make sha256sum gcc awk bison patch nproc python3; do
         command -v "${command_name}" >/dev/null 2>&1 || missing=1
     done
     (( missing == 0 )) && return 0
     log "installing missing glibc build dependencies"
-    install_os_packages curl tar xz coreutils ca-certificates build-tools bison gawk patch || return 30
+    install_os_packages curl tar xz coreutils ca-certificates build-tools bison gawk patch python || return 30
 }
 
 # 校验阶段需要 C 编译器来编译功能程序。

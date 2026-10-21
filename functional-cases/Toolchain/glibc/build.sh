@@ -145,7 +145,10 @@ build_glibc_from_source() {
     local actual_version version_output
 
     prepare_glibc_source || return $?
-    prepare_compatible_make || return $?
+    # 仅 glibc 2.31 需要私有 GNU Make 4.3;2.43 用系统 make 即可,不必多编译一次。
+    if [[ "${SOFTWARE_VERSION}" == "2.31" ]]; then
+        prepare_compatible_make || return $?
+    fi
 
     log "configuring glibc ${SOFTWARE_VERSION} (out-of-tree build)"
     mkdir -p "${BUILD_DIR}" || return 40
@@ -185,7 +188,7 @@ build_glibc_from_source() {
         log "ERROR: built ldconfig is missing: ${LDCONFIG_BIN}"
         return 40
     }
-    [[ -n "$(find "${INSTALL_DIR}/lib" -maxdepth 1 \( -type f -o -type l \) -name 'ld-linux-*.so.*' -print -quit 2>/dev/null)" ]] || {
+    [[ -n "$(loader_under_prefix "${INSTALL_DIR}")" ]] || {
         log "ERROR: installed glibc dynamic loader is missing under ${INSTALL_DIR}/lib"
         return 40
     }
@@ -193,7 +196,7 @@ build_glibc_from_source() {
         log "ERROR: built ldconfig cannot report its version"
         return 40
     }
-    actual_version="$(printf '%s\n' "${version_output}" | awk '{print $NF}')"
+    actual_version="$(normalize_version "$(printf '%s\n' "${version_output}" | awk '{print $NF}')")"
     [[ "${actual_version}" == "${SOFTWARE_VERSION}" ]] || {
         log "ERROR: built glibc reports ${actual_version}, requested ${SOFTWARE_VERSION}"
         return 40
@@ -220,7 +223,7 @@ install_glibc_layer_upstream_binary() {
 install_glibc_layer_repo_package() {
     local loader version ldconfig_bin
     apt_install libc6 libc-bin >/dev/null 2>&1 || true
-    loader="$(find /lib /lib64 /usr/lib /usr/lib64 -maxdepth 1 -name 'ld-linux-*.so.*' -print -quit 2>/dev/null || true)"
+    loader="$(system_glibc_loader || true)"
     [[ -n "${loader}" ]] || {
         log "layer2: the distro-provided glibc loader was not found"
         return 1
@@ -233,7 +236,7 @@ install_glibc_layer_repo_package() {
     ldconfig_bin="$(command -v ldconfig 2>/dev/null || true)"
     {
         printf 'GLIBC_LOADER=%s\n' "${loader}"
-        printf 'GLIBC_LIB_DIR=%s\n' "$(dirname "${loader}")"
+        printf 'GLIBC_LIB_DIR=%s\n' "$(loader_lib_dir "${loader}")"
         if [[ -n "${ldconfig_bin}" ]]; then
             printf 'LDCONFIG_BIN=%s\n' "${ldconfig_bin}"
         fi

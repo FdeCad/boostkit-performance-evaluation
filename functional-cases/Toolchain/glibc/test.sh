@@ -70,7 +70,8 @@ int main(void) {
     return 0;
 }
 C
-    (
+    local output
+    output="$(
         cd "${dir}"
         "${CC_BIN}" -O2 -o libc_prog libc_prog.c
         if [[ -n "${GLIBC_LOADER}" && -x "${GLIBC_LOADER}" ]]; then
@@ -79,20 +80,23 @@ C
         else
             ./libc_prog
         fi
-    ) | grep -qx glibc-libc-ok
+    )" || return 1
+    # 用 bash 模式匹配,避免依赖裁剪镜像里可能缺失的 grep。
+    [[ "${output}" == *glibc-libc-ok* ]]
 }
 
 # 用被测 glibc 的 getconf 报告版本:私有前缀的 getconf 通过被测加载器运行,
 # 系统 glibc 即被测对象(层2)时才直接用系统 getconf,避免把系统版本当成本次被测版本。
 reported_glibc_version() {
-    local getconf_bin
+    local getconf_bin line
     getconf_bin="$(resolve_glibc_getconf || true)"
     if [[ -n "${getconf_bin}" && -n "${GLIBC_LOADER}" && -x "${GLIBC_LOADER}" ]]; then
-        "${GLIBC_LOADER}" --library-path "${GLIBC_LIB_DIR}" "${getconf_bin}" GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}'
+        line="$("${GLIBC_LOADER}" --library-path "${GLIBC_LIB_DIR}" "${getconf_bin}" GNU_LIBC_VERSION 2>/dev/null || true)"
     else
-        getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}'
+        line="$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
     fi
-    return 0
+    # 输出形如 "glibc 2.43",版本号是最后一个字段。
+    normalize_version "${line##* }"
 }
 
 write_functional_result() {
