@@ -45,6 +45,9 @@ gcc_source_sha256() {
         14.4.0)
             printf '%s\n' "752b6f567beac83159c77a7680b1316bdd784738bff9a9d070112c09da90f6d9"
             ;;
+        16.2.0)
+            printf '%s\n' "e6738e29597f733270731aa90600f37ffdc045079dfc27ec7e8192cc81085c3e"
+            ;;
         *)
             return 1
             ;;

@@ -31,9 +31,26 @@ STANDALONE_KEEP_WORK_DIR=0
 
 log() { printf '[gcc-func] %s\n' "$*"; }
 
-# 解析 gcc/g++ 报告的版本号(gcc (GCC) 14.4.0 -> 14.4.0)。
+# 解析 gcc/g++ 报告的版本号。
+# 发行版打包会在括号里塞额外信息,不能直接取最后一列:
+#   `gcc (GCC) 12.3.1 20230508 (openEuler 12.3.1-110.oe2403sp4)`   -> 12.3.1
+#   `gcc (Ubuntu 16-20260816-1ubuntu1) 16.0.1 20260816 (experimental) [master r16-8246-g569ace1fa50]`
+#                                                                   -> 16.0.1
+# 因此先跳过开头的 "(...)",再取首个版本号字段。
 gcc_version_of() {
-    "$1" --version 2>/dev/null | head -n 1 | awk '{print $NF}' || true
+    local first rest word="" token
+    first="$("$1" --version 2>/dev/null | head -n 1 || true)"
+    rest="${first#*)}"
+    read -r word _ <<<"${rest}"
+    if [[ ! "${word}" =~ ^[0-9]+\.[0-9] ]]; then
+        word=""
+        for token in ${rest}; do
+            [[ "${token}" =~ ^[0-9]+\.[0-9] ]] || continue
+            word="${token}"
+            break
+        done
+    fi
+    printf '%s\n' "${word}"
 }
 
 # prebuilt 模式下定位镜像内已装好的 gcc 或 g++:依次探测常见位置,
@@ -46,6 +63,7 @@ resolve_prebuilt_gcc() {
             candidates=(
                 "$(command -v gcc 2>/dev/null || true)"
                 "/usr/bin/gcc"
+                "/usr/local/gcc/bin/gcc"
                 "/usr/local/bin/gcc"
                 "/opt/gcc/bin/gcc"
                 "/opt/gcc-${SOFTWARE_VERSION}/bin/gcc"
@@ -56,6 +74,7 @@ resolve_prebuilt_gcc() {
             candidates=(
                 "$(command -v g++ 2>/dev/null || true)"
                 "/usr/bin/g++"
+                "/usr/local/gcc/bin/g++"
                 "/usr/local/bin/g++"
                 "/opt/gcc/bin/g++"
                 "/opt/gcc-${SOFTWARE_VERSION}/bin/g++"

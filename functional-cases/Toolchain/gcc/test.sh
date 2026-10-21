@@ -127,6 +127,13 @@ func_check() {
     if [[ "${version_status}" != "passed" || "${upstream_status}" != "passed" || "${smoke_status}" != "passed" ]]; then
         overall="failed"
     fi
+    # 判定摘要写入 check.log:编译运行成功时没有输出,不写摘要会让产物为 0 字节,
+    # 框架会把它当成 missing output。
+    {
+        printf 'checks: version=%s upstream=%s smoke=%s\n' "${version_status}" "${upstream_status}" "${smoke_status}"
+        printf 'gcc: %s (expected %s)\n' "${actual:-unknown}" "${SOFTWARE_VERSION}"
+        printf 'gcc_bin: %s\n' "${GCC_BIN:-unset}"
+    } >>"${RESULTS_DIR}/check.log"
     write_functional_result "${overall}" \
         "version" "${version_status}" "${version_detail}" \
         "upstream-test" "${upstream_status}" "${upstream_detail}" \
