@@ -29,6 +29,7 @@ MAKE_INSTALL_DIR=""
 LDCONFIG_BIN=""
 GLIBC_LOADER=""
 GLIBC_LIB_DIR=""
+GLIBC_GETCONF=""
 CC_BIN=""
 # build 模式分层获取选定的 glibc 产物的路径标记:install 阶段若 layer2 采用发行版仓库包
 # 内置的系统 glibc,会把动态加载器/库目录/ldconfig 写入此文件,check 阶段据此复用。
@@ -113,9 +114,13 @@ loader_version_of() {
 loader_under_prefix() {
     local prefix="$1" dir candidate
     local -a dirs=(
+        "${prefix}"/lib/*-linux-gnu*
+        "${prefix}"/usr/lib/*-linux-gnu*
         "${prefix}/lib"
         "${prefix}/lib64"
         "${prefix}/lib32"
+        "${prefix}/usr/lib"
+        "${prefix}/usr/lib64"
         "${prefix}"
     )
     for dir in "${dirs[@]}"; do
@@ -203,8 +208,13 @@ glibc_version() {
 }
 
 # 被测 glibc 私有前缀自带的 getconf(前缀/bin/getconf);系统 glibc 为被测对象时为空。
+# 发行版 .deb 解包出来的 getconf 位于 <前缀>/usr/bin,由 GLIBC_GETCONF 显式指定。
 resolve_glibc_getconf() {
     local bin_dir
+    if [[ -n "${GLIBC_GETCONF}" && -x "${GLIBC_GETCONF}" ]]; then
+        printf '%s\n' "${GLIBC_GETCONF}"
+        return 0
+    fi
     [[ -n "${GLIBC_LIB_DIR}" ]] || return 0
     bin_dir="$(dirname "${GLIBC_LIB_DIR}")/bin"
     [[ -x "${bin_dir}/getconf" ]] && printf '%s\n' "${bin_dir}/getconf"
@@ -242,6 +252,7 @@ configure_runtime_paths() {
     if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
         # 镜像已装好:定位镜像内 glibc 的动态加载器,不构建。
         LDCONFIG_BIN=""
+        GLIBC_GETCONF=""
         GLIBC_LOADER="$(resolve_prebuilt_glibc_loader || true)"
         if [[ -n "${GLIBC_LOADER}" ]]; then
             GLIBC_LIB_DIR="$(loader_lib_dir "${GLIBC_LOADER}")"
@@ -251,6 +262,7 @@ configure_runtime_paths() {
     else
         # 当场构建:安装到本次任务私有前缀,不替换系统 glibc。
         LDCONFIG_BIN="${BUILD_DIR}/elf/ldconfig"
+        GLIBC_GETCONF=""
         GLIBC_LIB_DIR="${INSTALL_DIR}/lib"
         GLIBC_LOADER=""
         if [[ -d "${GLIBC_LIB_DIR}" ]]; then
@@ -264,6 +276,7 @@ configure_runtime_paths() {
                     LDCONFIG_BIN) LDCONFIG_BIN="${layer_value}" ;;
                     GLIBC_LOADER) GLIBC_LOADER="${layer_value}" ;;
                     GLIBC_LIB_DIR) GLIBC_LIB_DIR="${layer_value}" ;;
+                    GLIBC_GETCONF) GLIBC_GETCONF="${layer_value}" ;;
                 esac
             done <"${LAYERED_TOOL_FILE}"
         fi
@@ -275,7 +288,7 @@ configure_runtime_paths() {
 
     export SOFTWARE_NAME CATEGORY SOFTWARE_VERSION EXPECTED_ARCH FUNC_OS FUNC_HARDWARE FUNC_MODE
     export PERF_RUN_ID PERF_WORK_DIR RESULTS_DIR PERF_ACTUAL_VERSION_FILE TMPDIR
-    export SRC_DIR BUILD_DIR INSTALL_DIR MAKE_INSTALL_DIR LDCONFIG_BIN GLIBC_LOADER GLIBC_LIB_DIR CC_BIN
+    export SRC_DIR BUILD_DIR INSTALL_DIR MAKE_INSTALL_DIR LDCONFIG_BIN GLIBC_LOADER GLIBC_LIB_DIR GLIBC_GETCONF CC_BIN
     export LAYERED_TOOL_FILE
     export PATH
 }
@@ -327,6 +340,7 @@ install_os_packages() {
             python) rhel+=(python3); debian+=(python3) ;;
             patch) rhel+=(patch); debian+=(patch) ;;
             getconf) rhel+=(glibc-common); debian+=(libc-bin) ;;
+            dpkg) debian+=(dpkg) ;;
             *)
                 log "ERROR: unknown logical package: ${logical}"
                 return 30
@@ -334,7 +348,10 @@ install_os_packages() {
         esac
     done
     family="$(os_family)"
-    (( ${#rhel[@]} == 0 )) && return 0
+    # 只登记了 debian 侧的逻辑包时 rhel 数组为空,不能因此跳过安装。
+    if (( ${#rhel[@]} == 0 && ${#debian[@]} == 0 )); then
+        return 0
+    fi
     case "${family}" in
         rhel)
             log "installing via dnf: ${rhel[*]}"

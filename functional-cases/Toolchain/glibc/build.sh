@@ -45,6 +45,9 @@ glibc_source_sha256() {
         2.31)
             printf '%s\n' "9246fe44f68feeec8c666bb87973d590ce0137cca145df014c72ec95be9ffd17"
             ;;
+        2.34)
+            printf '%s\n' "44d26a1fe20b8853a48f470ead01e4279e869ac149b195dda4e44a195d981ab2"
+            ;;
         2.43)
             printf '%s\n' "d9c86c6b5dbddb43a3e08270c5844fc5177d19442cf5b8df4be7c07cd5fa3831"
             ;;
@@ -245,12 +248,91 @@ install_glibc_layer_repo_package() {
     return 0
 }
 
+# 层2b:发行版归档仓库里的历史 glibc 二进制包。
+# glibc 是系统库,当前发行版仓库只提供自己那一版;但 old-releases 归档里保留了
+# 各历史发行版的 libc6/libc-bin .deb(Ubuntu 21.10 impish 即 2.34),
+# 解包到私有前缀即可,属于"三方仓库已打包的二进制",无需源码编译。
+GLIBC_ARCHIVE_BASE="${GLIBC_ARCHIVE_BASE:-https://old-releases.ubuntu.com/ubuntu/pool/main/g/glibc}"
+
+install_glibc_layer_archive_binary() {
+    local deb_arch listing libc6_deb libc_bin_deb deb loader version
+    [[ "$(os_family)" == "debian" ]] || {
+        log "layer2b: archive binary packages are only wired for debian-family systems"
+        return 1
+    }
+    case "$(normalize_arch "${EXPECTED_ARCH}")" in
+        aarch64) deb_arch="arm64" ;;
+        x86_64) deb_arch="amd64" ;;
+        *)
+            log "layer2b: unsupported architecture ${EXPECTED_ARCH}"
+            return 1
+            ;;
+    esac
+    command -v dpkg-deb >/dev/null 2>&1 || install_os_packages dpkg || return 1
+    listing="${PERF_WORK_DIR}/glibc-archive-index.html"
+    mkdir -p "${PERF_WORK_DIR}/debs" "${INSTALL_DIR}"
+    curl -fsSL --retry 3 --connect-timeout 30 -o "${listing}" "${GLIBC_ARCHIVE_BASE}/" || {
+        log "layer2b: cannot list ${GLIBC_ARCHIVE_BASE}"
+        return 1
+    }
+    # 目录里有多个修订版本,用 sort -V 取最高者。
+    libc6_deb="$(
+        sed -n 's/.*href="\([^"]*\)".*/\1/p' "${listing}" \
+            | sed -n "\#^libc6_${SOFTWARE_VERSION}-.*_${deb_arch}\.deb\$#p" \
+            | sort -V | tail -n 1
+    )"
+    libc_bin_deb="$(
+        sed -n 's/.*href="\([^"]*\)".*/\1/p' "${listing}" \
+            | sed -n "\#^libc-bin_${SOFTWARE_VERSION}-.*_${deb_arch}\.deb\$#p" \
+            | sort -V | tail -n 1
+    )"
+    [[ -n "${libc6_deb}" ]] || {
+        log "layer2b: the archive publishes no libc6 ${SOFTWARE_VERSION} package for ${deb_arch}"
+        return 1
+    }
+    for deb in "${libc6_deb}" "${libc_bin_deb}"; do
+        [[ -n "${deb}" ]] || continue
+        curl -fsSL --retry 3 --connect-timeout 30 -o "${PERF_WORK_DIR}/debs/${deb}" \
+            "${GLIBC_ARCHIVE_BASE}/${deb}" || {
+            log "layer2b: failed to download ${deb}"
+            rm -rf -- "${INSTALL_DIR}"
+            return 1
+        }
+        dpkg-deb -x "${PERF_WORK_DIR}/debs/${deb}" "${INSTALL_DIR}" || {
+            log "layer2b: failed to unpack ${deb}"
+            rm -rf -- "${INSTALL_DIR}"
+            return 1
+        }
+    done
+    loader="$(loader_under_prefix "${INSTALL_DIR}" || true)"
+    [[ -n "${loader}" ]] || {
+        log "layer2b: the unpacked glibc provides no dynamic loader"
+        rm -rf -- "${INSTALL_DIR}"
+        return 1
+    }
+    version="$(loader_version_of "${loader}")"
+    if [[ "${version}" != "${SOFTWARE_VERSION}" ]]; then
+        log "layer2b: archive package provides glibc ${version:-unknown}, not ${SOFTWARE_VERSION}"
+        rm -rf -- "${INSTALL_DIR}"
+        return 1
+    fi
+    {
+        printf 'GLIBC_LOADER=%s\n' "${loader}"
+        printf 'GLIBC_LIB_DIR=%s\n' "$(loader_lib_dir "${loader}")"
+        if [[ -x "${INSTALL_DIR}/usr/bin/getconf" ]]; then
+            printf 'GLIBC_GETCONF=%s\n' "${INSTALL_DIR}/usr/bin/getconf"
+        fi
+    } >"${LAYERED_TOOL_FILE}"
+    log "layer2b: adopted archived distro glibc ${version} (loader ${loader})"
+    return 0
+}
+
 # 层3:从官方源码 tarball 独立构建(最后手段;GNU 官方仅分发源码,三方仓库版本多滞后)。
 install_glibc_layer_source_build() {
     build_glibc_from_source
 }
 
-# 分层获取入口:依次尝试三层,任一层成功即返回 0。
+# 分层获取入口:依次尝试四层,任一层成功即返回 0。
 install_glibc_layered() {
     if install_glibc_layer_upstream_binary; then
         log "acquired glibc via layer 1 (upstream official binary)"
@@ -261,7 +343,12 @@ install_glibc_layered() {
         log "acquired glibc via layer 2 (third-party repo package)"
         return 0
     fi
-    log "layer 2 (third-party repo package) unavailable; falling back to layer 3"
+    log "layer 2 (third-party repo package) unavailable; falling back to layer 2b"
+    if install_glibc_layer_archive_binary; then
+        log "acquired glibc via layer 2b (archived distro binary package)"
+        return 0
+    fi
+    log "layer 2b (archived distro binary package) unavailable; falling back to layer 3"
     if install_glibc_layer_source_build; then
         log "acquired glibc via layer 3 (source build)"
         return 0

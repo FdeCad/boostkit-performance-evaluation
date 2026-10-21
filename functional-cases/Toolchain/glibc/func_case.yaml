@@ -9,6 +9,7 @@ enabled: true
 # ftp.gnu.org 与各镜像站均不存在(实测 404),无法作为被测版本。
 versions:
   - "2.43"
+  - "2.34"
 
 execution:
   type: shell-functions
@@ -33,10 +34,12 @@ execution:
 # build 模式(FUNC_MODE=build,ubuntu 官方基础镜像内)按分层优先获取 glibc,每层版本需严格等于
 # SOFTWARE_VERSION,不匹配则降级:层1 上游官方二进制(GNU 仅源码,不可用)→
 # 层2 三方仓库包的发行版 libc6(与请求版本一致时采用系统 glibc)→
+# 层2b 发行版归档仓库的历史 libc6/libc-bin 二进制包(old-releases 的 .deb,
+#      解包到私有前缀,供当前发行版仓库已不提供的旧版本使用)→
 # 层3 官方源码 tarball 编译。
 checks:
   - name: version
-    description: 获取到的 glibc 版本必须等于请求版本(ldd/加载器输出,层1/2/3 任一来源均须匹配)
+    description: 获取到的 glibc 版本必须等于请求版本(ldd/加载器输出,层1/2/2b/3 任一来源均须匹配)
   # 代替上游测试:glibc 官方 make check 耗时过长,改用 libc 程序编译运行验证。
   - name: upstream-test
     description: 编译并运行一个使用 libc 的程序(memcpy/qsort/malloc)
