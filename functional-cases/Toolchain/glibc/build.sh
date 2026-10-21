@@ -45,6 +45,9 @@ glibc_source_sha256() {
         2.31)
             printf '%s\n' "9246fe44f68feeec8c666bb87973d590ce0137cca145df014c72ec95be9ffd17"
             ;;
+        2.43)
+            printf '%s\n' "d9c86c6b5dbddb43a3e08270c5844fc5177d19442cf5b8df4be7c07cd5fa3831"
+            ;;
         *)
             return 1
             ;;

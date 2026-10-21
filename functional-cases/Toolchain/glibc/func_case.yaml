@@ -4,9 +4,11 @@ name: glibc
 category: Toolchain
 enabled: true
 
-# 人工指定的待测版本(白名单),与 software/Toolchain/glibc/case.yaml 一致。
+# 人工指定的待测版本(白名单)。必须是 GNU 官方正式发布的版本:
+# GNU 只发布 x.y 形式的 release tarball,2.42.9000 这类开发快照号在
+# ftp.gnu.org 与各镜像站均不存在(实测 404),无法作为被测版本。
 versions:
-  - "2.42.9000"
+  - "2.43"
 
 execution:
   type: shell-functions

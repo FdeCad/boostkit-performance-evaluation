@@ -5,7 +5,7 @@ set -euo pipefail
 
 SOFTWARE_NAME="glibc"
 CATEGORY="Toolchain"
-SOFTWARE_VERSION="${SOFTWARE_VERSION:-2.31}"
+SOFTWARE_VERSION="${SOFTWARE_VERSION:-2.43}"
 EXPECTED_ARCH="${EXPECTED_ARCH:-$(uname -m)}"
 FUNC_OS="${FUNC_OS:-}"
 FUNC_HARDWARE="${FUNC_HARDWARE:-}"
@@ -100,15 +100,20 @@ loader_version_of() {
     "$1" --version 2>&1 | sed -n 's/.*release version \([0-9][0-9.]*\).*/\1/p' | head -n 1 || true
 }
 
-# prebuilt 模式下定位镜像内 glibc 的动态加载器(优先 /opt 下的私有 glibc 前缀)。
+# prebuilt 模式下定位镜像内 glibc 的动态加载器(优先私有前缀)。
+# 预构建镜像的安装前缀是 /usr/local/glibc(Dockerfile configure --prefix),
+# 因此显式列出该前缀;再用 /usr/local、/opt 兜底未知前缀。
 resolve_prebuilt_glibc_loader() {
     local root loader version fallback=""
     local -a roots=(
         "${GLIBC_PREFIX:-}"
+        "/usr/local/glibc"
+        "/usr/local/glibc-${SOFTWARE_VERSION}"
         "/opt/glibc-${SOFTWARE_VERSION}"
         "/opt/glibc/${SOFTWARE_VERSION}"
-        "/usr/local/glibc-${SOFTWARE_VERSION}"
         "/opt/glibc"
+        "/usr/local"
+        "/opt"
     )
     for root in "${roots[@]}"; do
         [[ -n "${root}" && -d "${root}" ]] || continue
@@ -141,6 +146,15 @@ glibc_version() {
     else
         return 1
     fi
+}
+
+# 被测 glibc 私有前缀自带的 getconf(前缀/bin/getconf);系统 glibc 为被测对象时为空。
+resolve_glibc_getconf() {
+    local bin_dir
+    [[ -n "${GLIBC_LIB_DIR}" ]] || return 0
+    bin_dir="$(dirname "${GLIBC_LIB_DIR}")/bin"
+    [[ -x "${bin_dir}/getconf" ]] && printf '%s\n' "${bin_dir}/getconf"
+    return 0
 }
 
 configure_runtime_paths() {

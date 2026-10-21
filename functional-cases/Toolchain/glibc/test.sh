@@ -82,6 +82,19 @@ C
     ) | grep -qx glibc-libc-ok
 }
 
+# 用被测 glibc 的 getconf 报告版本:私有前缀的 getconf 通过被测加载器运行,
+# 系统 glibc 即被测对象(层2)时才直接用系统 getconf,避免把系统版本当成本次被测版本。
+reported_glibc_version() {
+    local getconf_bin
+    getconf_bin="$(resolve_glibc_getconf || true)"
+    if [[ -n "${getconf_bin}" && -n "${GLIBC_LOADER}" && -x "${GLIBC_LOADER}" ]]; then
+        "${GLIBC_LOADER}" --library-path "${GLIBC_LIB_DIR}" "${getconf_bin}" GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}'
+    else
+        getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}'
+    fi
+    return 0
+}
+
 write_functional_result() {
     local overall="$1"
     shift
@@ -141,8 +154,8 @@ func_check() {
         upstream_detail="libc program compile/run failed; see check.log"
     fi
 
-    # 3) 基础功能 smoke:getconf 报告 libc 版本。
-    reported="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}' || true)"
+    # 3) 基础功能 smoke:被测 glibc 的 getconf 报告版本。
+    reported="$(reported_glibc_version)"
     if [[ "${reported}" == "${SOFTWARE_VERSION}" ]]; then
         smoke_status="passed"
         smoke_detail="getconf GNU_LIBC_VERSION = ${reported}"
