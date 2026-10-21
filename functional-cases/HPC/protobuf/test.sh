@@ -64,19 +64,22 @@ int main() {
 }
 CPP
     cat >"${dir}/CMakeLists.txt" <<'CMAKE'
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.16)
 project(pb_roundtrip CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-find_package(Protobuf REQUIRED)
-protobuf_generate_cpp(PB_SRCS PB_HDRS message.proto)
-add_executable(pb_roundtrip main.cpp ${PB_SRCS})
+# libprotobuf 依赖大量 absl 符号,只有 protobuf 自带的 CONFIG 包导出的
+# protobuf::libprotobuf 才携带这些链接依赖;FindProtobuf 模块模式不会。
+find_package(protobuf CONFIG REQUIRED)
+add_executable(pb_roundtrip main.cpp)
+protobuf_generate(TARGET pb_roundtrip LANGUAGE cpp PROTOC_EXE "${PROTOC_EXE}")
 target_include_directories(pb_roundtrip PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(pb_roundtrip PRIVATE protobuf::libprotobuf)
 CMAKE
     local -a prefix_args=()
     [[ -z "${PROTOBUF_CMAKE_PREFIX}" ]] || prefix_args+=("-DCMAKE_PREFIX_PATH=${PROTOBUF_CMAKE_PREFIX}")
-    cmake -S "${dir}" -B "${build}" -DCMAKE_BUILD_TYPE=Release "${prefix_args[@]}" || return 1
+    cmake -S "${dir}" -B "${build}" -DCMAKE_BUILD_TYPE=Release \
+        -DPROTOC_EXE="${PROTOC_BIN}" "${prefix_args[@]}" || return 1
     cmake --build "${build}" -j"$(nproc)" || return 1
     "${build}/pb_roundtrip"
 }
