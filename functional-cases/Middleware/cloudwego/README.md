@@ -54,4 +54,6 @@ CLI 版本来自对应标签内工具自身的版本常量，因此与源码标�
 
 本地 Ubuntu 26.04 / x86_64 的八项检查已通过。复用缓存的完整回归约 43 秒；首次生成 Volo 项目的 Rust 编译约 2 分 51 秒，首次 Volo CLI 的 Cargo 下载及 release 构建约 21 分 36 秒，耗时依赖网络与 CPU。源码归档篡改、生成 Go 代码语法错误、RPC 响应错误的反例均已验证会失败。本次测试环境初始化时 APT 将 `liblzma5` 升级了一个版本，未执行全量升级。
 
-本地 openEuler 24.03 LTS-SP4 / x86_64 预构建镜像 `openeulertest/cloudwego:0.16.4-oe2403sp4-x86_64` 的八项检查也已通过。首次尝试从 GitHub 下载 Eino 源码归档超时；成功运行改用先前保存、经本用例 SHA-256 基线再次校验的四份归档作为本地下载源，其余安装、检查、清理逻辑不变。鲲鹏 ARM64 工作流尚未实测。
+本地 openEuler 24.03 LTS-SP4 / x86_64 预构建镜像 `openeulertest/cloudwego:0.16.4-oe2403sp4-x86_64` 的八项检查也已通过。首次尝试从 GitHub 下载 Eino 源码归档超时；成功运行改用先前保存、经本用例 SHA-256 基线再次校验的四份归档作为本地下载源，其余安装、检查、清理逻辑不变。
+
+[鲲鹏 920 的 ARM64 流水线](https://github.com/FdeCad/boostkit-performance-evaluation/actions/runs/39539010527) 对提交 `b502aa8` 执行了 openEuler 预构建和 Ubuntu 构建两种模式：矩阵报告为 2/2 通过，两个结果文件中的八项检查也均为 `passed`。该次流水线未覆盖鲲鹏 950。
