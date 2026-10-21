@@ -40,6 +40,7 @@ FORWARD_ENV_KEYS = (
     "TMPDIR",
     "PERF_PROXY",
     "PYTHONUNBUFFERED",
+    "PERF_IMAGE_ROOTFS",
 )
 SHELL_FUNCTION_RUNNER = r"""
 script_path="$1"
@@ -67,6 +68,7 @@ class CellContext:
     os_runtime: str
     mode: str
     image: str
+    bootstrap_image: str
     hardware: str
     architecture: str
     run_id: str
@@ -129,6 +131,16 @@ def build_context(args: argparse.Namespace, case: dict[str, Any], config: dict[s
             args.version,
             args.architecture,
         )
+    # build 模式的 OS(Ubuntu)拿不到该版本的发行版二进制时,可从预构建镜像导出根文件系统复用。
+    bootstrap_template = case.get("bootstrap_image") or ""
+    bootstrap_image = ""
+    if bootstrap_template and os_spec.get("mode") == "build":
+        bootstrap_image = compose_image(
+            bootstrap_template,
+            case.get("image_name") or software,
+            args.version,
+            args.architecture,
+        )
     output_dir = (
         ROOT / config["output_root"] / category / software / args.version
         / args.os / args.hardware / args.run_id
@@ -149,6 +161,7 @@ def build_context(args: argparse.Namespace, case: dict[str, Any], config: dict[s
         os_runtime=os_spec["runtime"],
         mode=os_spec.get("mode", ""),
         image=image,
+        bootstrap_image=bootstrap_image,
         hardware=args.hardware,
         architecture=args.architecture,
         run_id=args.run_id,
@@ -171,6 +184,9 @@ def stage_environment(context: CellContext) -> dict[str, str]:
         "PERF_ACTUAL_VERSION_FILE": str(context.work_dir / "actual-version.txt"),
         "TMPDIR": str(context.work_dir / "tmp"),
         "PYTHONUNBUFFERED": "1",
+        "PERF_IMAGE_ROOTFS": (
+            str(_bootstrap_rootfs_dir(context)) if context.bootstrap_image else ""
+        ),
     }
 
 
@@ -200,6 +216,16 @@ def _pulled_image_marker(context: CellContext) -> Path:
     return context.work_dir / ".pulled-image"
 
 
+def _record_pulled_image(context: CellContext, image: str) -> None:
+    """Append an image pulled by this cell so cleanup can drop exactly those."""
+    marker = _pulled_image_marker(context)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    existing = marker.read_text(encoding="utf-8").splitlines() if marker.is_file() else []
+    if image in existing:
+        return
+    marker.write_text("\n".join([*existing, image]) + "\n", encoding="utf-8")
+
+
 def _ensure_image(context: CellContext) -> None:
     """Use the local image when present; otherwise pull it and record that we did."""
     engine = _container_engine()
@@ -215,30 +241,99 @@ def _ensure_image(context: CellContext) -> None:
     if pull.returncode != 0:
         raise RuntimeError(f"failed to pull image {image} (exit code {pull.returncode})")
     # 四个阶段是四个进程,用标记文件把"本次真的拉过"传给 cleanup 阶段。
-    marker = _pulled_image_marker(context)
-    marker.parent.mkdir(parents=True, exist_ok=True)
+    _record_pulled_image(context, image)
+
+
+def _bootstrap_rootfs_dir(context: CellContext) -> Path:
+    return context.work_dir / "image-rootfs"
+
+
+def _ensure_bootstrap_rootfs(context: CellContext) -> None:
+    """Export the prebuilt software image into the work dir for chroot reuse.
+
+    build 模式的 OS(如 Ubuntu 26.04)未必有对应版本的发行版二进制;此时把预构建镜像的
+    根文件系统导出到工作目录,容器内直接 chroot 复用镜像里已经装好的软件本体。
+    """
+    if not context.bootstrap_image:
+        return
+    target = _bootstrap_rootfs_dir(context)
+    marker = target.with_name(f"{target.name}.complete")
+    if marker.is_file() and target.is_dir():
+        return
+    engine = _container_engine()
+    image = context.bootstrap_image
+    local = subprocess.run(
+        [engine, "image", "inspect", image], capture_output=True, text=True
+    )
+    if local.returncode != 0:
+        print(f"[cell] bootstrap image {image} not found locally; pulling", flush=True)
+        if subprocess.run([engine, "pull", image]).returncode != 0:
+            raise RuntimeError(f"failed to pull bootstrap image {image}")
+        _record_pulled_image(context, image)
+
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=True)
+    target.mkdir(parents=True, exist_ok=True)
+    scratch = f"{_container_name(context)}-rootfs"
+    subprocess.run([engine, "rm", "-f", scratch], capture_output=True, text=True)
+    created = subprocess.run(
+        [engine, "create", "--name", scratch, image], capture_output=True, text=True
+    )
+    if created.returncode != 0:
+        raise RuntimeError(
+            f"failed to create exporter container from {image}: {created.stderr.strip()}"
+        )
+    try:
+        # 边导出边解包:ceph 这类镜像根文件系统有 10 GiB 级,落一个中间 tar 会把磁盘翻倍。
+        export_proc = subprocess.Popen(
+            [engine, "export", scratch], stdout=subprocess.PIPE
+        )
+        try:
+            extract_proc = subprocess.Popen(
+                ["tar", "--no-same-owner", "-xf", "-", "-C", str(target)],
+                stdin=export_proc.stdout,
+            )
+        finally:
+            if export_proc.stdout is not None:
+                export_proc.stdout.close()
+        extract_rc = extract_proc.wait()
+        export_rc = export_proc.wait()
+        if export_rc != 0 or extract_rc != 0:
+            raise RuntimeError(
+                f"failed to export {image} into {target} "
+                f"(export={export_rc}, extract={extract_rc})"
+            )
+    finally:
+        subprocess.run([engine, "rm", "-f", scratch], capture_output=True, text=True)
     marker.write_text(f"{image}\n", encoding="utf-8")
+    print(f"[cell] exported {image} rootfs to {target}", flush=True)
 
 
 def _remove_pulled_image(context: CellContext) -> None:
-    """Drop the image this cell pulled; never touch a shared build-mode base image."""
-    if context.mode != "prebuilt":
-        # build 模式用的是配置里的共享基础镜像(如 ubuntu:26.04),删掉会让其他 cell 重新拉取。
-        return
+    """Drop images this cell pulled; never touch a shared build-mode base image."""
     marker = _pulled_image_marker(context)
     if not marker.is_file():
         return
-    image = marker.read_text(encoding="utf-8").strip()
-    if image != context.image:
-        print(f"[cell] ignoring unexpected pulled-image marker: {image!r}", flush=True)
-        return
-    result = subprocess.run(
-        [_container_engine(), "rmi", image], capture_output=True, text=True
-    )
-    if result.returncode == 0:
-        print(f"[cell] removed pulled image {image}", flush=True)
-    else:
-        print(f"[cell] could not remove image {image}: {result.stderr.strip()}", flush=True)
+    removable: set[str] = set()
+    if context.mode == "prebuilt":
+        removable.add(context.image)
+    if context.bootstrap_image:
+        removable.add(context.bootstrap_image)
+    for image in marker.read_text(encoding="utf-8").splitlines():
+        image = image.strip()
+        if not image:
+            continue
+        if image not in removable:
+            # 如 build 模式的基础镜像 ubuntu:26.04,删掉会让其他 cell 重新拉取。
+            print(f"[cell] ignoring unexpected pulled-image marker: {image!r}", flush=True)
+            continue
+        result = subprocess.run(
+            [_container_engine(), "rmi", image], capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            print(f"[cell] removed pulled image {image}", flush=True)
+        else:
+            print(f"[cell] could not remove image {image}: {result.stderr.strip()}", flush=True)
 
 
 def _container_status(engine: str, name: str) -> str:
@@ -271,7 +366,9 @@ def _wait_until_running(engine: str, name: str, attempts: int = 60) -> None:
     raise RuntimeError(f"container {name} did not become exec-ready")
 
 
-def _ensure_container(context: CellContext, environment: dict[str, str]) -> str:
+def _ensure_container(
+    context: CellContext, environment: dict[str, str], stage: str
+) -> str:
     """Start (or reuse) one persistent container per cell.
 
     The container stays alive across stages so that build-mode installs
@@ -281,6 +378,10 @@ def _ensure_container(context: CellContext, environment: dict[str, str]) -> str:
     """
     engine = _container_engine()
     name = _container_name(context)
+    # cleanup 阶段只做收尾,不需要导出根文件系统;prepare 若在磁盘预检就失败,
+    # 这里再导出一次十 GiB 级 rootfs 只会白白占满磁盘。
+    if stage != "cleanup":
+        _ensure_bootstrap_rootfs(context)
     if _container_status(engine, name):
         if _container_status(engine, name) != "running":
             subprocess.run([engine, "start", name], check=True)
@@ -420,7 +521,7 @@ def run_stage(context: CellContext, stage: str, timeout_minutes: float) -> int:
 
     environment = stage_environment(context)
     if context.os_runtime == "container":
-        name = _ensure_container(context, environment)
+        name = _ensure_container(context, environment, stage)
         if stage == "check":
             _ensure_container_tools(_container_engine(), name, CHECK_STAGE_TOOLS)
         command = _container_exec_command(context, name, script, function, environment)

@@ -47,11 +47,6 @@ run_privileged() {
     fi
 }
 
-ceph_version_of() {
-    local bin="${1:-ceph}"
-    "${bin}" --version 2>/dev/null | sed -n 's/ceph version \([0-9][0-9.]*\).*/\1/p' | head -n 1
-}
-
 # 配置官方 Ceph 仓库并安装客户端与核心守护进程(仅覆盖不含该组件的 core 组件)。
 install_ceph_from_repo() {
     local family codename key_tmp
@@ -114,20 +109,28 @@ install_ceph_from_upstream_binary() {
 
 # 层 3:源码编译(最后手段)。下载官方源码 tarball,装构建依赖后用 CMake 编译安装。
 install_ceph_from_source() {
-    local src="${PERF_WORK_DIR}/ceph-src" tarball="${PERF_WORK_DIR}/ceph-${SOFTWARE_VERSION}.tar.bz2"
+    local src="${PERF_WORK_DIR}/ceph-src" tarball="" suffix
     command -v cmake >/dev/null 2>&1 || {
         log "layer 3: cmake is required to build ceph from source"
         return 30
     }
     rm -rf -- "${src}"
     mkdir -p "${src}" || return 30
-    log "layer 3: downloading ceph ${SOFTWARE_VERSION} source tarball"
-    if ! curl -fsSL --retry 3 --connect-timeout 30 -o "${tarball}" \
-        "${CEPH_TARBALL_URL}/ceph-${SOFTWARE_VERSION}.tar.bz2"; then
+    # 不同版本的上游 tarball 后缀不一致(如 16.2.8 只有 .tar.gz),逐个尝试。
+    for suffix in .tar.gz .tar.bz2; do
+        tarball="${PERF_WORK_DIR}/ceph-${SOFTWARE_VERSION}${suffix}"
+        log "layer 3: downloading ceph ${SOFTWARE_VERSION} source tarball (${suffix})"
+        if curl -fsSL --retry 3 --connect-timeout 30 -o "${tarball}" \
+            "${CEPH_TARBALL_URL}/ceph-${SOFTWARE_VERSION}${suffix}"; then
+            break
+        fi
+        tarball=""
+    done
+    [[ -n "${tarball}" ]] || {
         log "layer 3: failed to download the ceph source tarball"
         return 30
-    fi
-    if ! tar -xjf "${tarball}" -C "${src}" --strip-components=1; then
+    }
+    if ! tar -xf "${tarball}" -C "${src}" --strip-components=1; then
         log "layer 3: failed to extract the ceph source tarball"
         return 30
     fi
@@ -186,8 +189,19 @@ func_install() {
         }
         require_test_commands || return $?
     else
-        require_build_commands || return $?
-        install_ceph_build || return $?
+        if [[ -n "${CEPH_ROOTFS}" ]]; then
+            # Ubuntu 26.04 没有该版本的发行版 ceph 包:框架已把预构建镜像的根文件系统
+            # 导出到 CEPH_ROOTFS,软件本体就在里面,跳过所有安装层,只定位并校验版本。
+            log "build mode reuses the exported prebuilt image rootfs at ${CEPH_ROOTFS}"
+            resolve_ceph_binaries || {
+                log "ERROR: ceph is not present in the exported image rootfs"
+                return 40
+            }
+            require_test_commands || return $?
+        else
+            require_build_commands || return $?
+            install_ceph_build || return $?
+        fi
     fi
 
     actual="$(ceph_version_of "${CEPH_BIN}")"

@@ -12,26 +12,30 @@ source "${SCRIPT_DIR}/common.sh"
 # ---------- 阶段:check ----------
 
 # 运行上游自带、可离线执行的编码/映射工具,验证核心库功能。
+# CEPH_ROOTFS 非空时工具路径来自导出的根文件系统,统一经 chroot 执行。
 run_upstream_selftest() {
     local dencoder monmaptool map
-    dencoder="$(command -v ceph-dencoder 2>/dev/null || true)"
+    dencoder="$(ceph_tool_path ceph-dencoder || true)"
     [[ -n "${dencoder}" ]] || {
         log "ERROR: ceph-dencoder is not available"
         return 40
     }
-    "${dencoder}" types list >>"${RESULTS_DIR}/ceph_smoke.log" 2>&1 || {
+    ceph_exec "${dencoder}" types list >>"${RESULTS_DIR}/ceph_smoke.log" 2>&1 || {
         log "ERROR: ceph-dencoder self-test failed"
         return 40
     }
-    monmaptool="$(command -v monmaptool 2>/dev/null || true)"
+    monmaptool="$(ceph_tool_path monmaptool || true)"
     if [[ -n "${monmaptool}" ]]; then
         map="${SERVICE_DIR}/monmap"
-        "${monmaptool}" --create --clobber --add a 127.0.0.1:6789 "${map}" \
+        # chroot 内看到的是根文件系统自己的目录树,先把 map 的父目录在根文件系统内建好,
+        # 这样同一绝对路径在 chroot 内外都指向同一个文件。
+        [[ -z "${CEPH_ROOTFS}" ]] || mkdir -p "$(dirname "${CEPH_ROOTFS}${map}")"
+        ceph_exec "${monmaptool}" --create --clobber --add a 127.0.0.1:6789 "${map}" \
             >>"${RESULTS_DIR}/ceph_smoke.log" 2>&1 || {
             log "ERROR: monmaptool --create failed"
             return 40
         }
-        "${monmaptool}" --print "${map}" >>"${RESULTS_DIR}/ceph_smoke.log" 2>&1 || {
+        ceph_exec "${monmaptool}" --print "${map}" >>"${RESULTS_DIR}/ceph_smoke.log" 2>&1 || {
             log "ERROR: monmaptool --print failed"
             return 40
         }
@@ -43,8 +47,8 @@ run_upstream_selftest() {
 run_daemon_availability() {
     local bin version_ok=0
     for bin in "${CEPH_MON_BIN}" "${CEPH_OSD_BIN}" "${CEPH_MGR_BIN}"; do
-        [[ -n "${bin}" && -x "${bin}" ]] || continue
-        "${bin}" --version >>"${RESULTS_DIR}/ceph_smoke.log" 2>&1 || return 40
+        ceph_bin_exists "${bin}" || continue
+        ceph_exec "${bin}" --version >>"${RESULTS_DIR}/ceph_smoke.log" 2>&1 || return 40
         version_ok=1
     done
     [[ "${version_ok}" -eq 1 ]] || {
