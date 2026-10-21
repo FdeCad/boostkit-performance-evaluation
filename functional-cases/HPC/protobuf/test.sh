@@ -71,7 +71,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # libprotobuf 依赖大量 absl 符号,只有 protobuf 自带的 CONFIG 包导出的
 # protobuf::libprotobuf 才携带这些链接依赖;FindProtobuf 模块模式不会。
 find_package(protobuf CONFIG REQUIRED)
-add_executable(pb_roundtrip main.cpp)
+add_executable(pb_roundtrip main.cpp message.proto)
 protobuf_generate(TARGET pb_roundtrip LANGUAGE cpp PROTOC_EXE "${PROTOC_EXE}")
 target_include_directories(pb_roundtrip PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(pb_roundtrip PRIVATE protobuf::libprotobuf)
