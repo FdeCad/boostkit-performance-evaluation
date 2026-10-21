@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # cloudwego 测试脚本:功能判定 + 收尾。
-# 判定为:Kitex 版本 + Kitex/Hertz 自带 go test 用例 + Hertz 最小 HTTP 回环 smoke。
+# 判定:组件 CLI 版本、Kitex/Hertz 上游测试、HTTP 回环、代码生成和 Eino 测试。
 # 暴露给 Framework 的阶段:check、cleanup。独立执行时依次运行这两个阶段。
 set -euo pipefail
 
@@ -17,8 +17,8 @@ log_line() {
 # 运行 Kitex 与 Hertz 自带的上游单元测试。
 run_upstream_tests() {
     [[ -f "${KITEX_SOURCE_DIR}/go.mod" && -f "${HERTZ_SOURCE_DIR}/go.mod" ]] || return 1
-    (cd "${KITEX_SOURCE_DIR}" && "${GO_BIN}" test ./client/...) || return 1
-    (cd "${HERTZ_SOURCE_DIR}" && "${GO_BIN}" test ./pkg/...) || return 1
+    (cd "${KITEX_SOURCE_DIR}" && "${GO_BIN}" test -count=1 -timeout 5m ./client/...) || return 1
+    (cd "${HERTZ_SOURCE_DIR}" && "${GO_BIN}" test -count=1 -timeout 5m ./pkg/...) || return 1
 }
 
 # 用 Hertz 起一个最小 HTTP 服务,再用标准库 client 回环请求,校验响应内容。
@@ -36,8 +36,9 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"strings"
+	"encoding/json"
 	"time"
+ "net"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
@@ -46,15 +47,23 @@ import (
 )
 
 func main() {
-	addr := "127.0.0.1:18999"
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+    if err != nil { panic(err) }
+    addr := listener.Addr().String()
+    listener.Close()
 	h := server.Default(server.WithHostPorts(addr))
 	h.GET("/ping", func(c context.Context, ctx *app.RequestContext) {
 		ctx.JSON(consts.StatusOK, utils.H{"ping": "pong"})
 	})
 	go h.Spin()
-	time.Sleep(time.Second)
-
-	resp, err := http.Get("http://" + addr + "/ping")
+	client := &http.Client{Timeout: 2 * time.Second}
+    var resp *http.Response
+    deadline := time.Now().Add(10 * time.Second)
+    for time.Now().Before(deadline) {
+        resp, err = client.Get("http://" + addr + "/ping")
+        if err == nil { break }
+        time.Sleep(100 * time.Millisecond)
+    }
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "request failed:", err)
 		os.Exit(1)
@@ -65,7 +74,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "read failed:", err)
 		os.Exit(1)
 	}
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "pong") {
+	var payload map[string]string
+    if resp.StatusCode != http.StatusOK || json.Unmarshal(body, &payload) != nil || payload["ping"] != "pong" {
 		fmt.Fprintf(os.Stderr, "unexpected response: status=%d body=%q\n", resp.StatusCode, string(body))
 		os.Exit(1)
 	}
@@ -75,94 +85,118 @@ GO
     (cd "${HERTZ_SOURCE_DIR}" && "${GO_BIN}" run ./functest_smoke)
 }
 
-write_functional_result() {
-    local overall="$1" v_status="$2" v_detail="$3" u_status="$4" u_detail="$5" c_status="$6" c_detail="$7"
-    FUNC_OVERALL="${overall}" \
-        FUNC_V_STATUS="${v_status}" FUNC_V_DETAIL="${v_detail}" \
-        FUNC_U_STATUS="${u_status}" FUNC_U_DETAIL="${u_detail}" \
-        FUNC_C_STATUS="${c_status}" FUNC_C_DETAIL="${c_detail}" \
-        python3 - "${RESULTS_DIR}/functional_result.json" <<'PY'
-import json, os, sys
-
-out = sys.argv[1]
-env = os.environ.get
-payload = {
-    "software": env("SOFTWARE_NAME"),
-    "category": env("CATEGORY"),
-    "version": env("SOFTWARE_VERSION"),
-    "os": env("FUNC_OS"),
-    "mode": env("FUNC_MODE"),
-    "hardware": env("FUNC_HARDWARE") or None,
-    "architecture": env("EXPECTED_ARCH"),
-    "run_id": env("PERF_RUN_ID"),
-    "status": env("FUNC_OVERALL"),
-    "checks": [
-        {"name": "version", "status": env("FUNC_V_STATUS"), "detail": env("FUNC_V_DETAIL")},
-        {"name": "upstream-test", "status": env("FUNC_U_STATUS"), "detail": env("FUNC_U_DETAIL")},
-        {"name": "smoke", "status": env("FUNC_C_STATUS"), "detail": env("FUNC_C_DETAIL")},
-    ],
+run_codegen() {
+    CODEGEN_DIR=""
+    local dir
+    dir="$(mktemp -d "${PERF_WORK_DIR}/codegen.XXXXXX")" || return 40
+    mkdir -p "${dir}/kitex" "${dir}/hz" "${dir}/volo" || return 40
+    cat >"${dir}/echo.thrift" <<'IDL'
+namespace go echo
+struct Request { 1: string message }
+struct Response { 1: string message }
+service Echo { Response Ping(1: Request req) (api.post="/ping") }
+IDL
+    (cd "${dir}/kitex" && "${KITEX_BIN}" -module cloudwego.local/echo ../echo.thrift) || return 40
+    [[ -s "${dir}/kitex/kitex_gen/echo/echo.go" ]] || return 40
+    (cd "${dir}/hz" && "${HZ_BIN}" new -mod cloudwego.local/http -idl ../echo.thrift) || return 40
+    [[ -s "${dir}/hz/main.go" ]] || return 40
+    (cd "${dir}/volo" && "${VOLO_BIN}" init echo ../echo.thrift) || return 40
+    [[ -s "${dir}/volo/Cargo.toml" && -s "${dir}/volo/src/lib.rs" ]] || return 40
+    CODEGEN_DIR="${dir}"
+    printf '%s\n' "${dir}" >"${RESULTS_DIR}/codegen-dir.txt"
 }
-tmp = out + ".tmp"
-with open(tmp, "w", encoding="utf-8") as handle:
-    handle.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
-os.replace(tmp, out)
-PY
+
+run_source_integrity() {
+    local component tag
+    for component in kitex hertz volo eino; do
+        case "${component}" in
+            kitex) tag="v${SOFTWARE_VERSION}" ;;
+            hertz) tag="v${CLOUDWEGO_HERTZ_VERSION}" ;;
+            volo) tag="volo-thrift-${CLOUDWEGO_VOLO_VERSION}" ;;
+            eino) tag="v${CLOUDWEGO_EINO_VERSION}" ;;
+        esac
+        python3 "${SCRIPT_DIR}/verify_source.py" "${component}" "${tag}" "${PERF_WORK_DIR}/${component}.tar.gz" || return 40
+    done
+}
+
+run_generated_build() {
+    [[ -n "${CODEGEN_DIR:-}" ]] || { log "ERROR: code generation did not succeed"; return 40; }
+    local component module version source
+    for component in kitex hz; do
+        if [[ "${component}" == kitex ]]; then
+            module=github.com/cloudwego/kitex; version="${SOFTWARE_VERSION}"; source="${KITEX_SOURCE_DIR}"
+        else
+            module=github.com/cloudwego/hertz; version="${CLOUDWEGO_HERTZ_VERSION}"; source="${HERTZ_SOURCE_DIR}"
+        fi
+        (
+            cd "${CODEGEN_DIR}/${component}" || exit 40
+            "${GO_BIN}" mod edit "-require=${module}@v${version}" "-replace=${module}=${source}" || exit 40
+            "${GO_BIN}" mod tidy || exit 40
+            "${GO_BIN}" build -mod=readonly ./... || exit 40
+            cp go.mod "${RESULTS_DIR}/generated-${component}.mod" || exit 40
+            cp go.sum "${RESULTS_DIR}/generated-${component}.sum" || exit 40
+        ) || return 40
+    done
+    python3 "${SCRIPT_DIR}/pin_generated.py" "${CODEGEN_DIR}/volo" "${VOLO_SOURCE_DIR}" || return 40
+    (
+        cd "${CODEGEN_DIR}/volo" || exit 40
+        # 新项目需要更新锁文件以加入生成包；框架源和直接依赖均固定。
+        cargo metadata --filter-platform "$(rustc -vV | sed -n 's/^host: //p')" --format-version 1 >"${RESULTS_DIR}/generated-cargo-metadata.json" || exit 40
+        cp Cargo.lock "${RESULTS_DIR}/generated-Cargo.lock" || exit 40
+        cargo build --locked
+    ) || return 40
+}
+
+run_kitex_rpc() {
+    [[ -n "${CODEGEN_DIR:-}" ]] || { log "ERROR: code generation did not succeed"; return 40; }
+    cp "${SCRIPT_DIR}/kitex_rpc_test.go" "${CODEGEN_DIR}/kitex/rpc_test.go" || return 40
+    (cd "${CODEGEN_DIR}/kitex" && "${GO_BIN}" mod tidy && "${GO_BIN}" test -mod=readonly -count=1 -timeout 30s -v -run '^TestRPCRoundtrip$' .)
+}
+
+run_eino_tests() {
+    (cd "${EINO_SOURCE_DIR}" && "${GO_BIN}" test -count=1 -timeout 5m ./schema/... ./components/prompt/...)
 }
 
 func_check() {
     initialize_runtime || return $?
     : >"${RESULTS_DIR}/cloudwego_test.log"
-
-    if [[ ! -x "${GO_BIN}" ]]; then
-        log "ERROR: Go toolchain is unavailable"
-        return 40
-    fi
-    if [[ ! -f "${KITEX_SOURCE_DIR}/go.mod" ]]; then
-        log "ERROR: kitex source tree is unavailable: ${KITEX_SOURCE_DIR}"
-        return 40
-    fi
-
-    local version_status="failed" version_detail=""
-    local upstream_status="failed" upstream_detail=""
-    local smoke_status="failed" smoke_detail=""
-    local actual
-
-    # 1) 版本(Kitex)
-    actual="$(read_cloudwego_version "${KITEX_SOURCE_DIR}")"
-    if [[ "${actual}" == "${SOFTWARE_VERSION}" ]]; then
-        version_status="passed"
-        version_detail="kitex v${actual}"
-    else
-        version_detail="kitex v${actual:-unknown}, expected v${SOFTWARE_VERSION}"
-    fi
-
-    # 2) 上游 go test(Kitex client 包 + Hertz pkg 包)
-    if run_upstream_tests >"${RESULTS_DIR}/upstream_test.log" 2>&1; then
-        upstream_status="passed"
-        upstream_detail="'go test ./client/...' (kitex) and 'go test ./pkg/...' (hertz) passed"
-    else
-        upstream_detail="'go test' failed; see upstream_test.log"
-    fi
-
-    # 3) 内部 smoke:Hertz 最小 HTTP 回环
-    if run_hertz_smoke >"${RESULTS_DIR}/hertz_smoke.log" 2>&1; then
-        smoke_status="passed"
-        smoke_detail="hertz server/client roundtrip ok"
-    else
-        smoke_detail="hertz roundtrip failed; see hertz_smoke.log"
-    fi
-
-    local overall="passed"
-    if [[ "${version_status}" != "passed" || "${upstream_status}" != "passed" || "${smoke_status}" != "passed" ]]; then
-        overall="failed"
-    fi
-    write_functional_result "${overall}" \
-        "${version_status}" "${version_detail}" \
-        "${upstream_status}" "${upstream_detail}" \
-        "${smoke_status}" "${smoke_detail}"
-    log_line "checks: version=${version_status} upstream=${upstream_status} smoke=${smoke_status}"
-
-    [[ "${overall}" == "passed" ]] || return 50
+    : >"${RESULTS_DIR}/checks.tsv"
+    local name function status overall=passed
+    CODEGEN_DIR=""
+    for name in source-integrity version upstream-test smoke codegen generated-build kitex-rpc eino-test; do
+        case "${name}" in
+            source-integrity) function=run_source_integrity ;;
+            generated-build) function=run_generated_build ;;
+            kitex-rpc) function=run_kitex_rpc ;;
+            version) function=verify_components ;;
+            upstream-test) function=run_upstream_tests ;;
+            smoke) function=run_hertz_smoke ;;
+            codegen) function=run_codegen ;;
+            eino-test) function=run_eino_tests ;;
+        esac
+        if "${function}" >"${RESULTS_DIR}/${name}.log" 2>&1; then
+            status=passed
+        else
+            status=failed
+            overall=failed
+        fi
+        printf '%s\t%s\tsee %s.log\n' "${name}" "${status}" "${name}" >>"${RESULTS_DIR}/checks.tsv"
+        log_line "${name}: ${status}"
+    done
+    python3 - "${RESULTS_DIR}" "${overall}" <<'RESULT' || return 40
+import json, os, sys
+from pathlib import Path
+out = Path(sys.argv[1])
+checks = []
+for line in (out / 'checks.tsv').read_text().splitlines():
+    name, status, detail = line.split('\t')
+    checks.append(dict(name=name, status=status, detail=detail))
+r = dict(software='cloudwego', category='Middleware', version=os.environ['SOFTWARE_VERSION'],
+         os=os.environ['FUNC_OS'], mode=os.environ['FUNC_MODE'], hardware=os.environ.get('FUNC_HARDWARE'),
+         architecture=os.environ['EXPECTED_ARCH'], run_id=os.environ['PERF_RUN_ID'], status=sys.argv[2], checks=checks)
+(out / 'functional_result.json').write_text(json.dumps(r, indent=2) + '\n')
+RESULT
+    [[ "${overall}" == passed ]] || return 50
 }
 
 # ---------- 阶段:cleanup ----------
@@ -170,6 +204,10 @@ func_check() {
 func_cleanup() {
     initialize_runtime || return $?
     [[ -d "${HERTZ_SOURCE_DIR}/functest_smoke" ]] && rm -rf -- "${HERTZ_SOURCE_DIR}/functest_smoke"
+    local generated
+    for generated in "${PERF_WORK_DIR}"/codegen.*; do
+        [[ ! -d "${generated}" ]] || rm -rf -- "${generated}" || return 70
+    done
     log "cleaned cloudwego task data"
 }
 

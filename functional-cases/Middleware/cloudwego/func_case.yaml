@@ -27,21 +27,24 @@ execution:
       function: func_cleanup
   timeout_minutes: 90
 
-# 功能判定项,名称与 functional_result.json 中 checks[].name 一一对应。
-# 判定来源:优先复用上游测试套件(upstream_command),不足时用内部 smoke 补齐。
-# build 模式(FUNC_MODE=build,ubuntu 官方基础镜像内)按分层优先获取各组件源码,每层版本需严格
-# 等于锁定版本,不匹配则降级:层1 经 GOPROXY 按精确版本拉取 Go module →
-# 层2 三方仓库包(Kitex/Hertz 为纯 Go 库,无预编译产物,结构性不可用)→
-# 层3 git clone 对应 tag(兜底)。
+# 与参考镜像对齐：Kitex 0.16.4 / Hertz 0.10.6 / Volo tag 0.12.2 / Eino 0.9.22。
 checks:
+  - name: source-integrity
+    description: 四个固定 tag 的源码归档 SHA-256 必须匹配仓库内基线
   - name: version
-    description: 套件旗舰 Kitex 的源码版本必须严格等于请求版本
-  # CloudWeGo 各组件自带 go test 用例,即官方测试套件。
+    description: 检查实际 Kitex、hz、volo CLI 版本及 Eino 源码标记
   - name: upstream-test
-    description: 运行 Kitex(client 包)与 Hertz(pkg 包)自带的上游 Go 单元测试
-    upstream_command: go test ./client/... (kitex) && go test ./pkg/... (hertz)
+    description: 实际运行 Kitex client 和 Hertz pkg 的上游测试，禁用测试缓存
   - name: smoke
-    description: 用 Hertz 起一个最小 HTTP 服务并回环请求,校验响应内容
+    description: Hertz 最小 HTTP 服务回环，校验状态码及 JSON 响应
+  - name: codegen
+    description: 使用实际 Kitex、hz、volo 工具处理本地 Thrift IDL 并检查生成文件
+  - name: generated-build
+    description: Kitex、hz 生成代码执行 go build，Volo 生成项目执行 cargo build --locked
+  - name: kitex-rpc
+    description: 使用生成的服务代码启动 Kitex TCP 服务并校验三种请求的精确响应
+  - name: eino-test
+    description: 运行 Eino schema 和 prompt 的离线单元测试
 
 outputs:
   functional_result:

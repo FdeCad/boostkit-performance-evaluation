@@ -1,13 +1,6 @@
 #!/usr/bin/env bash
-# cloudwego 构建脚本:环境采集 + 准备被测软件(Go 工具链 + 获取套件各组件源码)。
-#   Go 工具链优先用 PATH 上的 go;缺失时取官方二进制解压到私有目录(不安装到系统)。
-#   套件源码克隆到私有工作区并预取模块依赖,均不污染系统。
-#
-# build 模式的分层优先获取(优先级从高到低,每层都校验版本 == 锁定版本):
-#   层1 上游官方分发(Go module / GOPROXY):按精确版本 v<version> 经 GOPROXY 拉取各组件源码。
-#   层2 三方仓库已打包的二进制/包:无。Kitex/Hertz/Netpoll 均为纯 Go 库,无预编译二进制产物。
-#   层3 源码(兜底):git clone v<version> tag 得到完整仓库树。
-# 暴露给 Framework 的阶段:prepare、install。独立执行时依次运行这两个阶段。
+# CloudWeGo: fixed Dockerfile component tags; build tools privately on Ubuntu,
+# validate existing CLI tools and Eino source in prebuilt images.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -73,116 +66,58 @@ install_go_toolchain() {
     log "installed private Go toolchain: $("${GO_BIN}" version | awk '{print $3}')"
 }
 
-# 层1:经 GOPROXY 按精确版本 v<version> 拉取 Go module 源码。
-#   取得的源码树没有 .git,写入 .cloudwego-version 供版本校验回退读取。
-acquire_component_from_proxy() {
-    local name="$1" module="$2" version="$3" dest="$4"
-    [[ -x "${GO_BIN}" ]] || {
-        log "layer1: Go toolchain is unavailable"
-        return 10
-    }
-    [[ ! -e "${dest}" ]] || {
-        log "layer1: source directory is not clean: ${dest}"
-        return 20
-    }
-    local probe_dir="${PERF_WORK_DIR}/probe-${name}" json dir ver
-    rm -rf -- "${probe_dir}"
-    mkdir -p "${probe_dir}" || return 30
-    (cd "${probe_dir}" && "${GO_BIN}" mod init "probe-${name}") >/dev/null 2>&1 || true
-    json="$(cd "${probe_dir}" && "${GO_BIN}" mod download -json "${module}@v${version}" 2>/dev/null)" || {
-        log "layer1: failed to fetch ${module}@v${version} from GOPROXY"
-        return 30
-    }
-    dir="$(printf '%s' "${json}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("Dir",""))' 2>/dev/null || true)"
-    ver="$(printf '%s' "${json}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("Version",""))' 2>/dev/null || true)"
-    [[ -n "${dir}" && -d "${dir}" ]] || {
-        log "layer1: module cache directory is unavailable for ${name}"
-        return 40
-    }
-    [[ "${ver}" == "v${version}" ]] || {
-        log "layer1: ${name} version '${ver:-none}' != v${version}, downgrade"
-        return 40
-    }
-    mkdir -p "${dest}" || return 30
-    cp -a "${dir}/." "${dest}/" || {
-        log "layer1: failed to copy the ${name} source into ${dest}"
-        return 40
-    }
-    chmod -R u+w "${dest}" 2>/dev/null || true
-    [[ -f "${dest}/go.mod" ]] || {
-        log "layer1: go.mod is missing in the ${name} source"
-        return 40
-    }
-    printf '%s\n' "${version}" >"${dest}/.cloudwego-version" || return 40
-    return 0
-}
-
-# 层3:git clone 对应 tag(兜底)。
-clone_component() {
-    local name="$1" version="$2" dest="$3"
-    command -v git >/dev/null 2>&1 || {
-        log "ERROR: git is required to fetch the upstream source"
-        return 40
-    }
-    [[ ! -e "${dest}" ]] || {
-        log "ERROR: source directory is not clean: ${dest}"
-        return 20
-    }
-    log "layer3: cloning ${name} v${version} from ${CLOUDWEGO_SOURCE_BASE}/${name}.git"
-    GIT_TERMINAL_PROMPT=0 git clone --branch "v${version}" --depth 1 \
-        "${CLOUDWEGO_SOURCE_BASE}/${name}.git" "${dest}" || {
-        log "ERROR: failed to clone ${name} v${version}"
-        return 30
-    }
-    [[ -f "${dest}/go.mod" ]] || {
-        log "ERROR: ${name} source tree is incomplete: ${dest}"
-        return 40
-    }
-    return 0
-}
-
-# 单组件获取:层1 GOPROXY 模块 → 层3 git 源码(兜底)。
+# 使用参考 Dockerfile 的固定 tag 归档，保留嵌套模块（Hertz cmd/hz）。
 acquire_component() {
-    local name="$1" version="$2" dest="$3"
-    if acquire_component_from_proxy "${name}" "${CLOUDWEGO_MODULE_BASE}/${name}" "${version}" "${dest}"; then
-        log "layer1 ok: ${name} ${version} from Go module proxy"
-        return 0
-    fi
-    log "layer1 unavailable for ${name}; layer3: git tag v${version}"
-    rm -rf -- "${dest}"
-    clone_component "${name}" "${version}" "${dest}"
+    local name="$1" tag="$2" dest="$3" archive="${PERF_WORK_DIR}/$1.tar.gz"
+    [[ ! -e "${dest}" ]] || { log "ERROR: source directory is not clean: ${dest}"; return 20; }
+    curl -fSL --connect-timeout 30 --retry 3 -o "${archive}" \
+        "${CLOUDWEGO_SOURCE_BASE}/${name}/archive/refs/tags/${tag}.tar.gz" || return 30
+    python3 "${SCRIPT_DIR}/verify_source.py" "${name}" "${tag}" "${archive}" || return 30
+    mkdir -p "${dest}" || return 30
+    tar -xzf "${archive}" -C "${dest}" --strip-components=1 || return 30
+    sha256sum "${archive}" >>"${RESULTS_DIR}/source-sha256.txt" || return 30
+    printf '%s\n' "${tag}" >"${dest}/.cloudwego-version"
 }
 
 func_install() {
     initialize_runtime || return $?
     check_architecture || return $?
+    [[ "${SOFTWARE_VERSION}" == 0.16.4 ]] || return 10
     require_build_commands || return $?
-
-    local actual
     install_go_toolchain || return $?
-
-    acquire_component kitex "${SOFTWARE_VERSION}" "${KITEX_SOURCE_DIR}" || return $?
-    acquire_component hertz "${CLOUDWEGO_HERTZ_VERSION}" "${HERTZ_SOURCE_DIR}" || return $?
-    acquire_component netpoll "${CLOUDWEGO_NETPOLL_VERSION}" "${NETPOLL_SOURCE_DIR}" || return $?
-
-    actual="$(read_cloudwego_version "${KITEX_SOURCE_DIR}")"
-    [[ "${actual}" == "${SOFTWARE_VERSION}" ]] || {
-        log "ERROR: checked-out kitex version '${actual:-unknown}' does not match ${SOFTWARE_VERSION}"
-        return 40
-    }
-
-    local dir
-    for dir in "${KITEX_SOURCE_DIR}" "${HERTZ_SOURCE_DIR}" "${NETPOLL_SOURCE_DIR}"; do
-        log "prefetching module dependencies for $(basename "${dir}")"
-        (cd "${dir}" && "${GO_BIN}" mod download) || {
-            log "ERROR: failed to download module dependencies for ${dir}"
-            return 40
-        }
-    done
-
+    export PATH="$(dirname "${GO_BIN}"):${PATH}"
+    acquire_component kitex "v${SOFTWARE_VERSION}" "${KITEX_SOURCE_DIR}" || return $?
+    acquire_component hertz "v${CLOUDWEGO_HERTZ_VERSION}" "${HERTZ_SOURCE_DIR}" || return $?
+    acquire_component eino "v${CLOUDWEGO_EINO_VERSION}" "${EINO_SOURCE_DIR}" || return $?
+    acquire_component volo "volo-thrift-${CLOUDWEGO_VOLO_VERSION}" "${VOLO_SOURCE_DIR}" || return $?
+    if [[ "${FUNC_MODE}" == build ]]; then
+        mkdir -p "${INSTALL_DIR}/bin"
+        (cd "${KITEX_SOURCE_DIR}" && "${GO_BIN}" build -ldflags="-s -w" -o "${KITEX_BIN}" ./tool/cmd/kitex) || return 40
+        (cd "${HERTZ_SOURCE_DIR}/cmd/hz" && "${GO_BIN}" build -ldflags="-s -w" -o "${HZ_BIN}" .) || return 40
+        (cd "${VOLO_SOURCE_DIR}" && cargo build --release --locked -p volo-cli) || return 40
+        install -m755 "${CARGO_TARGET_DIR}/release/volo" "${VOLO_BIN}" || return 40
+    else
+        # 镜像删除了 Kitex/Hertz 源码；重新下载仅供上游测试，工具本身必须用镜像已有的。
+        [[ -f /eino/go.mod ]] || { log "ERROR: image Eino source missing"; return 40; }
+        python3 - "${EINO_SOURCE_DIR}" /eino <<'EINO_CHECK' || return 40
+from pathlib import Path
+import sys
+reference, image = map(Path, sys.argv[1:])
+for p in reference.rglob('*'):
+    if p.is_file() and p.name != '.cloudwego-version':
+        other = image / p.relative_to(reference)
+        if not other.is_file() or p.read_bytes() != other.read_bytes():
+            raise SystemExit(f'image Eino source mismatch: {other}')
+EINO_CHECK
+    fi
+    (cd "${EINO_SOURCE_DIR}" && "${GO_BIN}" mod download && "${GO_BIN}" build ./...) || return 40
+    # 使用 Kitex go.mod 锁定的 thriftgo v0.4.5，避免 hz 自动安装 @latest。
+    mkdir -p "${INSTALL_DIR}/bin"
+    (cd "${KITEX_SOURCE_DIR}" && "${GO_BIN}" build -o "${INSTALL_DIR}/bin/thriftgo" github.com/cloudwego/thriftgo) || return 40
+    verify_components || return $?
     mkdir -p "$(dirname "${PERF_ACTUAL_VERSION_FILE}")"
-    printf '%s\n' "${actual}" >"${PERF_ACTUAL_VERSION_FILE}" || return 40
-    log "cloudwego ${actual} ready (kitex=${SOFTWARE_VERSION}, hertz=${CLOUDWEGO_HERTZ_VERSION}, netpoll=${CLOUDWEGO_NETPOLL_VERSION}, go=$("${GO_BIN}" version | awk '{print $3}'))"
+    printf '%s\n' "${SOFTWARE_VERSION}" >"${PERF_ACTUAL_VERSION_FILE}"
+    log "CloudWeGo ready: Kitex ${SOFTWARE_VERSION}, Hertz ${CLOUDWEGO_HERTZ_VERSION}, Volo tag ${CLOUDWEGO_VOLO_VERSION} (CLI ${CLOUDWEGO_VOLO_CLI_VERSION}), Eino ${CLOUDWEGO_EINO_VERSION}"
 }
 
 # ---------- 独立运行入口 ----------

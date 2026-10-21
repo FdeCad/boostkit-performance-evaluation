@@ -18,16 +18,21 @@ PERF_ACTUAL_VERSION_FILE="${PERF_ACTUAL_VERSION_FILE:-}"
 
 # 套件组件(人工维护,与 SOFTWARE_VERSION 同批核对):
 #   kitex   取套件版本标识本身,即 v${SOFTWARE_VERSION}
-#   hertz   / netpoll 各自独立发版,固定为各自的最新稳定 tag
+#   其余版本与参考 Dockerfile 一致，不自动跟随最新版本。
+CLOUDWEGO_KITEX_CLI_VERSION="0.16.3"
+CLOUDWEGO_HZ_CLI_VERSION="0.9.7"
 CLOUDWEGO_HERTZ_VERSION="${CLOUDWEGO_HERTZ_VERSION:-0.10.6}"
-CLOUDWEGO_NETPOLL_VERSION="${CLOUDWEGO_NETPOLL_VERSION:-0.7.5}"
+CLOUDWEGO_VOLO_VERSION="0.12.2"
+# 此源码 tag 中 volo-cli 的独立版本是 0.12.1。
+CLOUDWEGO_VOLO_CLI_VERSION="0.12.1"
+CLOUDWEGO_EINO_VERSION="0.9.22"
 CLOUDWEGO_MODULE_BASE="${CLOUDWEGO_MODULE_BASE:-github.com/cloudwego}"
 CLOUDWEGO_SOURCE_BASE="${CLOUDWEGO_SOURCE_BASE:-https://github.com/cloudwego}"
 # 模块依赖通过 Go 代理拉取;与仓库内其它 Go 用例使用同一组镜像。
 CLOUDWEGO_PROXY="${CLOUDWEGO_PROXY:-https://goproxy.cn|https://repo.huaweicloud.com/repository/goproxy/}"
 # 编译套件的 Go 工具链版本;优先使用 PATH 上的 go,缺失时取官方二进制。
-GO_SRC_VERSION="${GO_SRC_VERSION:-1.26.9}"
-GO_RELEASE_URL="${GO_RELEASE_URL:-https://go.dev/dl}"
+GO_SRC_VERSION="${GO_SRC_VERSION:-1.24.4}"
+GO_RELEASE_URL="${GO_RELEASE_URL:-https://golang.google.cn/dl}"
 
 SOURCE_DIR=""
 GO_DIR=""
@@ -35,7 +40,8 @@ GO_BIN=""
 GO_ARCH=""
 KITEX_SOURCE_DIR=""
 HERTZ_SOURCE_DIR=""
-NETPOLL_SOURCE_DIR=""
+VOLO_SOURCE_DIR=""
+EINO_SOURCE_DIR=""
 STANDALONE_OWNS_WORK_DIR=0
 STANDALONE_KEEP_WORK_DIR=0
 
@@ -46,20 +52,21 @@ cloudwego_component_version() {
     case "$1" in
         kitex) printf '%s\n' "${SOFTWARE_VERSION}" ;;
         hertz) printf '%s\n' "${CLOUDWEGO_HERTZ_VERSION}" ;;
-        netpoll) printf '%s\n' "${CLOUDWEGO_NETPOLL_VERSION}" ;;
+        volo) printf '%s\n' "${CLOUDWEGO_VOLO_VERSION}" ;;
+        eino) printf '%s\n' "${CLOUDWEGO_EINO_VERSION}" ;;
         *) return 1 ;;
     esac
 }
 
 # 从检出源码读取版本(vX.Y.Z -> X.Y.Z)。
-# 层1 经 GOPROXY 取得的 Go module 源码树没有 .git,此时回退读取安装阶段写入的版本标记。
+# 归档无 Git 元数据时读取安装阶段记录的 tag。
 read_cloudwego_version() {
     local src="$1" tag
     tag="$(git -C "${src}" describe --tags --exact-match 2>/dev/null || true)"
     if [[ -n "${tag}" ]]; then
         printf '%s\n' "${tag#v}"
     elif [[ -f "${src}/.cloudwego-version" ]]; then
-        cat "${src}/.cloudwego-version"
+        sed 's/^v//' "${src}/.cloudwego-version"
     fi
 }
 
@@ -107,15 +114,13 @@ check_architecture() {
 # 解析 PATH 或私有目录中的 go;找不到时返回非零,由 install 阶段负责安装。
 resolve_go_toolchain() {
     local candidate
-    candidate="$(command -v go 2>/dev/null || true)"
-    if [[ -n "${candidate}" ]]; then
-        GO_BIN="${candidate}"
-        return 0
-    fi
-    if [[ -x "${GO_DIR}/bin/go" ]]; then
-        GO_BIN="${GO_DIR}/bin/go"
-        return 0
-    fi
+    GO_BIN=""
+    for candidate in "${GO_DIR}/bin/go" /usr/local/go/bin/go "$(command -v go 2>/dev/null || true)"; do
+        if [[ -x "${candidate}" && "$(GOTOOLCHAIN=local "${candidate}" version | awk '{print $3}')" == "go${GO_SRC_VERSION}" ]]; then
+            GO_BIN="${candidate}"
+            return 0
+        fi
+    done
     return 1
 }
 
@@ -156,7 +161,23 @@ configure_runtime_paths() {
     SOURCE_DIR="${PERF_WORK_DIR}/cloudwego-source"
     KITEX_SOURCE_DIR="${SOURCE_DIR}/kitex"
     HERTZ_SOURCE_DIR="${SOURCE_DIR}/hertz"
-    NETPOLL_SOURCE_DIR="${SOURCE_DIR}/netpoll"
+    VOLO_SOURCE_DIR="${SOURCE_DIR}/volo"
+    EINO_SOURCE_DIR="${SOURCE_DIR}/eino"
+    INSTALL_DIR="${PERF_WORK_DIR}/install"
+    if [[ "${FUNC_MODE}" == prebuilt ]]; then
+        KITEX_BIN=/usr/local/bin/kitex
+        HZ_BIN=/usr/local/bin/hz
+        VOLO_BIN=/usr/local/bin/volo
+    else
+        KITEX_BIN="${INSTALL_DIR}/bin/kitex"
+        HZ_BIN="${INSTALL_DIR}/bin/hz"
+        VOLO_BIN="${INSTALL_DIR}/bin/volo"
+    fi
+    export PATH="${INSTALL_DIR}/bin:${PATH}"
+    export INSTALL_DIR KITEX_BIN HZ_BIN VOLO_BIN
+    export CARGO_HOME="${PERF_WORK_DIR}/cargo"
+    export CARGO_TARGET_DIR="${PERF_WORK_DIR}/cargo-target"
+    export CGO_ENABLED=0 GO111MODULE=on VOLO_DISABLE_UPDATE_CHECK=1
     GO_DIR="${PERF_WORK_DIR}/go${GO_SRC_VERSION}"
 
     # Go 环境隔离:模块/GOPATH/缓存全部落在本次任务私有目录;GOTOOLCHAIN=local
@@ -168,21 +189,22 @@ configure_runtime_paths() {
     export GOTOOLCHAIN=local
     export GOENV=off
     export GOCACHE="${PERF_WORK_DIR}/gocache"
-    # 允许在代理不可达时直接落到源站。
+    # 保留既有代理环境的校验服务设置。
     export GOSUMDB=off
 
     resolve_go_toolchain || true
+    [[ -z "${GO_BIN}" ]] || export PATH="$(dirname "${GO_BIN}"):${PATH}"
 
     export SOFTWARE_NAME CATEGORY SOFTWARE_VERSION EXPECTED_ARCH FUNC_OS FUNC_HARDWARE FUNC_MODE
     export PERF_RUN_ID PERF_WORK_DIR RESULTS_DIR PERF_ACTUAL_VERSION_FILE TMPDIR
-    export CLOUDWEGO_HERTZ_VERSION CLOUDWEGO_NETPOLL_VERSION CLOUDWEGO_MODULE_BASE
+    export CLOUDWEGO_HERTZ_VERSION CLOUDWEGO_VOLO_VERSION CLOUDWEGO_VOLO_CLI_VERSION CLOUDWEGO_EINO_VERSION CLOUDWEGO_MODULE_BASE
     export CLOUDWEGO_SOURCE_BASE CLOUDWEGO_PROXY GO_SRC_VERSION GO_RELEASE_URL GO_ARCH
-    export SOURCE_DIR GO_DIR GO_BIN KITEX_SOURCE_DIR HERTZ_SOURCE_DIR NETPOLL_SOURCE_DIR
+    export SOURCE_DIR GO_DIR GO_BIN KITEX_SOURCE_DIR HERTZ_SOURCE_DIR VOLO_SOURCE_DIR EINO_SOURCE_DIR
 }
 
 initialize_runtime() {
     configure_runtime_paths || return $?
-    mkdir -p "${RESULTS_DIR}" "${PERF_WORK_DIR}" "${TMPDIR}"
+    mkdir -p "${RESULTS_DIR}" "${PERF_WORK_DIR}" "${TMPDIR}" "${GOPATH}/src" "${INSTALL_DIR}/bin"
 }
 
 # ---------- OS 感知的依赖安装(build 模式用) ----------
@@ -221,6 +243,8 @@ install_os_packages() {
             curl) rhel+=(curl); debian+=(curl) ;;
             tar) rhel+=(tar); debian+=(tar) ;;
             gzip) rhel+=(gzip); debian+=(gzip) ;;
+            ca-certificates) rhel+=(ca-certificates); debian+=(ca-certificates) ;;
+            native-build) rhel+=(gcc gcc-c++ make cmake pkgconf perl rust cargo rustfmt openssl-devel zlib-devel); debian+=(build-essential cmake pkg-config perl rustc cargo rustfmt libssl-dev zlib1g-dev) ;;
             *)
                 log "ERROR: unknown logical package: ${logical}"
                 return 30
@@ -253,9 +277,31 @@ require_build_commands() {
     command -v curl >/dev/null 2>&1 || logical+=(curl)
     command -v tar >/dev/null 2>&1 || logical+=(tar)
     command -v gzip >/dev/null 2>&1 || logical+=(gzip)
+    [[ -s /etc/ssl/certs/ca-certificates.crt || -s /etc/pki/tls/certs/ca-bundle.crt ]] || logical+=(ca-certificates)
+    if [[ "${FUNC_MODE}" == build ]]; then
+        # 包括头文件依赖；包管理器保留已满足的版本，不执行全量升级。
+        logical+=(native-build)
+    fi
     (( ${#logical[@]} == 0 )) && return 0
     log "installing missing dependencies: ${logical[*]}"
     install_os_packages "${logical[@]}" || return 30
+}
+
+verify_components() {
+    [[ "${SOFTWARE_VERSION}" == 0.16.4 ]] || return 40
+    "${KITEX_BIN}" --version >"${RESULTS_DIR}/kitex-version.txt" 2>&1 || return 40
+    "${HZ_BIN}" --version >"${RESULTS_DIR}/hz-version.txt" 2>&1 || return 40
+    "${VOLO_BIN}" --version >"${RESULTS_DIR}/volo-version.txt" 2>&1 || return 40
+    python3 - "${RESULTS_DIR}" "${CLOUDWEGO_KITEX_CLI_VERSION}" "${CLOUDWEGO_HZ_CLI_VERSION}" "${CLOUDWEGO_VOLO_CLI_VERSION}" <<'VERSIONS' || return 40
+import re, sys
+from pathlib import Path
+for tool, expected in zip(('kitex', 'hz', 'volo'), sys.argv[2:]):
+    text = (Path(sys.argv[1]) / (tool + '-version.txt')).read_text()
+    versions = re.findall(r'(?<![\d.])v?(\d+\.\d+\.\d+)(?![\d.])', text)
+    if expected not in versions:
+        raise SystemExit(f'{tool}: expected {expected}, got {text!r}')
+VERSIONS
+    [[ "$(cat "${EINO_SOURCE_DIR}/.cloudwego-version")" == "v${CLOUDWEGO_EINO_VERSION}" ]] || return 40
 }
 
 json_escape() {
