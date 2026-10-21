@@ -68,7 +68,21 @@ wait_for_rest() {
         sleep 1
     done
     log "ERROR: Flink REST endpoint did not become ready: ${FLINK_REST_URL}"
+    # 直接带出守护进程日志尾部,排障不必再翻产物(cleanup 会删 runtime 目录)。
+    tail -n 40 "${FLINK_RUNTIME_DIR}"/logs/*.log >>"${RESULTS_DIR}/flink_cluster.log" 2>/dev/null || true
     return 40
+}
+
+# 收集 Flink 守护进程自身的日志到结果目录(REST 不就绪/示例失败时的关键证据)。
+# 必须在 check 阶段完成:func_cleanup 会删除 FLINK_RUNTIME_DIR。
+collect_daemon_logs() {
+    local f
+    [[ -d "${FLINK_RUNTIME_DIR}/logs" ]] || return 0
+    shopt -s nullglob
+    for f in "${FLINK_RUNTIME_DIR}/logs"/*; do
+        cp -a "${f}" "${RESULTS_DIR}/" 2>/dev/null || true
+    done
+    shopt -u nullglob
 }
 
 wait_for_taskmanager() {
@@ -224,6 +238,7 @@ func_check() {
         "${version_status}" "${version_detail}" \
         "${upstream_status}" "${upstream_detail}" \
         "${smoke_status}" "${smoke_detail}"
+    collect_daemon_logs
     log "checks: version=${version_status} upstream-example=${upstream_status} cluster-smoke=${smoke_status}"
 
     [[ "${overall}" == "passed" ]] || return 50

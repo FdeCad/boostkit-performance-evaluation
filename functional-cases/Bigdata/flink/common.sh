@@ -197,6 +197,21 @@ apt_install() {
     fi
 }
 
+# Flink 运行时要求的 Java 大版本(官方支持矩阵,见 1.18 release notes 与
+# java_compatibility 文档:Java 17 自 1.18 起才支持,2.x 默认 17):
+#   <1.18  -> 11(1.16/1.17 在 Java 17 上 JobManager 启动即崩)
+#   >=1.18 -> 17
+flink_java_major() {
+    local major minor
+    major="${SOFTWARE_VERSION%%.*}"
+    minor="${SOFTWARE_VERSION#*.}"; minor="${minor%%.*}"
+    if [[ "${major}" -eq 1 && "${minor}" -lt 18 ]]; then
+        printf '11\n'
+    else
+        printf '17\n'
+    fi
+}
+
 install_os_packages() {
     local logical family
     local -a rhel=() debian=()
@@ -204,7 +219,13 @@ install_os_packages() {
         case "${logical}" in
             python3) rhel+=(python3); debian+=(python3) ;;
             download-tools) rhel+=(curl tar gzip); debian+=(curl tar gzip) ;;
-            jdk) rhel+=(java-17-openjdk-devel); debian+=(openjdk-17-jdk-headless) ;;
+            jdk)
+                # JDK 包跟随被测 Flink 版本,不能无脑装 17(1.16/1.17 不支持 Java 17 运行时)。
+                case "$(flink_java_major)" in
+                    11) rhel+=(java-11-openjdk-devel); debian+=(openjdk-11-jdk-headless) ;;
+                    *) rhel+=(java-17-openjdk-devel); debian+=(openjdk-17-jdk-headless) ;;
+                esac
+                ;;
             git) rhel+=(git); debian+=(git) ;;
             maven) rhel+=(maven); debian+=(maven) ;;
             *)

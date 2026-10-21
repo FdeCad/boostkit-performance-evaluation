@@ -66,12 +66,23 @@ flink_archive_for_version() {
 }
 
 verify_java_runtime() {
-    local major
+    local major allowed
     major="$(java -version 2>&1 | sed -nE '1{s/.*version "([0-9]+).*/\1/p;}')"
-    case "${major}" in
-        11 | 17 | 21) ;;
+    # 官方 Java 运行时支持矩阵:1.18 起才支持 Java 17;2.x 默认 17。
+    case "$(flink_java_major)" in
+        11) allowed="8 11" ;;
         *)
-            log "ERROR: Apache Flink ${SOFTWARE_VERSION} requires Java 11/17/21; found: $(java -version 2>&1 | head -n 1)"
+            if [[ "${SOFTWARE_VERSION%%.*}" -eq 1 ]]; then
+                allowed="8 11 17"
+            else
+                allowed="17 21"
+            fi
+            ;;
+    esac
+    case " ${allowed} " in
+        *" ${major} "*) ;;
+        *)
+            log "ERROR: Apache Flink ${SOFTWARE_VERSION} requires Java (${allowed}); found: $(java -version 2>&1 | head -n 1)"
             return 30
             ;;
     esac
