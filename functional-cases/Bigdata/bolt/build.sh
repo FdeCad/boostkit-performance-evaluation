@@ -59,19 +59,63 @@ ensure_conan() {
     }
 }
 
+# 通过 GitHub API 把短 sha 解析为完整 40 位 sha(git fetch 服务端只接受完整对象名;
+# 实测短 sha 直接 fetch 报 "couldn't find remote ref")。输入已是完整 sha 时原样返回。
+resolve_full_commit() {
+    local query="${1}" repo=""
+    if [[ "${query}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+        printf '%s\n' "${query,,}"
+        return 0
+    fi
+    if [[ "${BOLT_SOURCE_URL}" =~ github\.com[:/]+([A-Za-z0-9._-]+/[A-Za-z0-9._-]+) ]]; then
+        repo="${BASH_REMATCH[1]%.git}"
+    else
+        log "ERROR: cannot resolve a commit ref without a github.com source URL: ${BOLT_SOURCE_URL}"
+        return 1
+    fi
+    log "resolving commit ${query} via GitHub API (repo: ${repo})"
+    https_proxy="${PERF_PROXY:-${https_proxy:-}}" python3 - "${repo}" "${query}" <<'PY'
+import json, sys, urllib.request
+
+repo, query = sys.argv[1], sys.argv[2]
+req = urllib.request.Request(
+    f"https://api.github.com/repos/{repo}/commits/{query}",
+    headers={"Accept": "application/vnd.github+json"},
+)
+with urllib.request.urlopen(req, timeout=30) as resp:
+    print(json.load(resp)["sha"])
+PY
+}
+
 clone_bolt_source() {
     command -v git >/dev/null 2>&1 || {
         log "ERROR: git is required to fetch the Bolt source"
         return 40
     }
-    [[ ! -e "${BOLT_SOURCE_DIR}" ]] || {
+    [[ -n "${BOLT_SOURCE_DIR}" && ! -e "${BOLT_SOURCE_DIR}" ]] || {
         log "ERROR: source directory is not clean: ${BOLT_SOURCE_DIR}"
         return 20
     }
     log "cloning Bolt ${SOFTWARE_VERSION} from ${BOLT_SOURCE_URL}"
-    GIT_TERMINAL_PROMPT=0 git clone --branch "${SOFTWARE_VERSION}" --depth 1 \
-        "${BOLT_SOURCE_URL}" "${BOLT_SOURCE_DIR}" || {
-        log "ERROR: failed to clone Bolt ${SOFTWARE_VERSION}"
+    # 路径 1:分支 / tag 直接浅克隆(如 standalone 传 main)。
+    if GIT_TERMINAL_PROMPT=0 git clone --branch "${SOFTWARE_VERSION}" --depth 1 \
+        "${BOLT_SOURCE_URL}" "${BOLT_SOURCE_DIR}"; then
+        return 0
+    fi
+    # 路径 2:commit(--branch 不接受 sha)。解析完整 sha 后按对象浅抓取,detached 检出。
+    rm -rf -- "${BOLT_SOURCE_DIR}"
+    local full_sha
+    full_sha="$(resolve_full_commit "${SOFTWARE_VERSION}")" || {
+        log "ERROR: cannot resolve Bolt ref ${SOFTWARE_VERSION} to a full commit sha"
+        return 30
+    }
+    log "fetching Bolt commit ${full_sha}"
+    GIT_TERMINAL_PROMPT=0 git init -q "${BOLT_SOURCE_DIR}" &&
+        git -C "${BOLT_SOURCE_DIR}" remote add origin "${BOLT_SOURCE_URL}" &&
+        GIT_TERMINAL_PROMPT=0 git -C "${BOLT_SOURCE_DIR}" fetch --depth 1 origin "${full_sha}" &&
+        git -C "${BOLT_SOURCE_DIR}" checkout --detach --quiet FETCH_HEAD || {
+        rm -rf -- "${BOLT_SOURCE_DIR}"
+        log "ERROR: failed to fetch Bolt commit ${full_sha}"
         return 30
     }
 }
@@ -98,18 +142,13 @@ build_bolt() {
 # 优先级:1) 上游官方二进制  2) 三方仓库打包的二进制/包/镜像  3) 源码编译。
 # Bolt(bytedance/bolt)是纯源码分发的 C++ 原生引擎:官方不发布任何二进制/release/tag,
 # 也没有 Docker 镜像与发行版仓库包,且 build 模式无嵌套 docker。故层 1、层 2 均无可用渠道,
-# 只能走层 3(Conan + CMake 重构建)。版本校验:上游无 tag,以 git ref(默认 main)为基准,
+# 只能走层 3(Conan + CMake 重构建)。上游无 tag,版本基线为 git ref / commit
+# (请求值 = 分支名或 commit sha,匹配语义见 common.sh 的 bolt_version_accepts),
 # 并要求构建产物目录存在。
 
-# 读取当前获取得到的 Bolt 版本(以 git ref 为版本基准;读不到时返回非零)。
-bolt_effective_ref() {
-    [[ -d "${BOLT_SOURCE_DIR}/.git" ]] || return 1
-    git -C "${BOLT_SOURCE_DIR}" rev-parse --abbrev-ref HEAD 2>/dev/null || return 1
-}
-
+# 版本校验:源码树实际版本匹配请求值,且构建产物目录存在。
 bolt_version_matches() {
-    [[ "$(bolt_effective_ref || true)" == "${SOFTWARE_VERSION}" ]] || return 1
-    [[ -d "${BOLT_BUILD_DIR}" ]]
+    bolt_ref_matches_request && [[ -d "${BOLT_BUILD_DIR}" ]]
 }
 
 # 层 1:上游官方二进制。Bolt 官方仅源码分发,不提供任何预编译二进制;本层不可用。
@@ -173,12 +212,14 @@ func_install() {
         require_build_commands || return $?
         ensure_conan || return $?
         install_bolt_build || return $?
-        # 上游无 tag,以分支名作为版本;commit 写入结果目录便于追溯。
+        # 上游无 tag:actual = 分支名或短 commit;完整 commit sha 记入日志便于追溯。
         actual="$(bolt_effective_ref || true)"
-        log "Bolt ${actual} built at $(git -C "${BOLT_SOURCE_DIR}" rev-parse --short HEAD)"
+        log "Bolt ${actual} built at commit $(bolt_full_commit 2>/dev/null || true)"
     fi
 
-    [[ "${actual}" == "${SOFTWARE_VERSION}" ]] || {
+    # prebuilt(actual = 镜像内 BUILD_VERSION)与 build(actual = ref/短 sha)统一用
+    # 共享匹配语义:精确相等,或短 sha 与完整 sha 互为前缀。
+    bolt_version_accepts "${actual}" || {
         log "ERROR: Bolt ${actual:-unknown}, expected ${SOFTWARE_VERSION}"
         return 40
     }

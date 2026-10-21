@@ -5,8 +5,9 @@ set -euo pipefail
 
 SOFTWARE_NAME="bolt"
 CATEGORY="Bigdata"
-# 上游 bytedance/bolt 目前不发布任何 release / tag,默认 BUILD_VERSION=main。
-# 因此以 main 分支(及其 commit)作为待测版本;安装脚本用 ref/commit 做版本校验。
+# 上游 bytedance/bolt 不发布任何 release / tag,没有传统语义的"版本":
+# 以待测 commit 短 sha 作为 SOFTWARE_VERSION(白名单见 func_case.yaml 的 versions)。
+# 因此安装脚本用 git ref / commit 做版本校验。
 SOFTWARE_VERSION="${SOFTWARE_VERSION:-main}"
 EXPECTED_ARCH="${EXPECTED_ARCH:-$(uname -m)}"
 FUNC_OS="${FUNC_OS:-}"
@@ -92,6 +93,45 @@ resolve_bolt_root() {
         fi
     done
     return 1
+}
+
+# ---------- 版本标识与匹配(上游无 tag,版本基线 = git ref / commit) ----------
+
+# 读取当前源码树的版本标识:分支检出返回分支名;detached HEAD(按 commit 测试)
+# 返回短 commit sha(rev-parse --abbrev-ref 此时只会返回字面量 "HEAD")。
+bolt_effective_ref() {
+    [[ -d "${BOLT_SOURCE_DIR}/.git" ]] || return 1
+    local ref
+    ref="$(git -C "${BOLT_SOURCE_DIR}" rev-parse --abbrev-ref HEAD 2>/dev/null)" || return 1
+    if [[ "${ref}" != "HEAD" ]]; then
+        printf '%s\n' "${ref}"
+        return 0
+    fi
+    git -C "${BOLT_SOURCE_DIR}" rev-parse --short HEAD 2>/dev/null
+}
+
+# 读取完整 commit sha(无源码树或读取失败时返回非零)。
+bolt_full_commit() {
+    [[ -d "${BOLT_SOURCE_DIR}/.git" ]] || return 1
+    git -C "${BOLT_SOURCE_DIR}" rev-parse HEAD 2>/dev/null
+}
+
+# 请求版本与实际值匹配:精确相等,或两者均为 7~40 位 hex sha 且互为前缀
+# (短 sha 与完整 sha 互认,与 git 的 sha 前缀语义一致)。
+bolt_version_accepts() {
+    local actual="${1:-}"
+    [[ "${actual}" == "${SOFTWARE_VERSION}" ]] && return 0
+    [[ "${actual}" =~ ^[0-9a-fA-F]{7,40}$ && "${SOFTWARE_VERSION}" =~ ^[0-9a-fA-F]{7,40}$ ]] || return 1
+    [[ "${actual}" == "${SOFTWARE_VERSION}"* || "${SOFTWARE_VERSION}" == "${actual}"* ]]
+}
+
+# 源码树的实际版本(分支名/短 sha/完整 sha 任一形态)是否匹配请求版本。
+bolt_ref_matches_request() {
+    local actual full
+    actual="$(bolt_effective_ref 2>/dev/null || true)"
+    bolt_version_accepts "${actual}" && return 0
+    full="$(bolt_full_commit 2>/dev/null || true)"
+    bolt_version_accepts "${full}"
 }
 
 configure_runtime_paths() {

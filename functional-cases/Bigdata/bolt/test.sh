@@ -68,24 +68,31 @@ func_check() {
     local smoke_status="failed" smoke_detail=""
     local actual commit lib
 
-    # 1) 版本:上游无 tag,以分支/ref 作为版本;commit 记录到 detail 便于追溯。
+    # 1) 版本:上游无 tag,版本基线为 commit。build 模式下按 commit 检出是 detached HEAD,
+    #    actual = 短 commit sha(见 common.sh bolt_effective_ref),完整 sha 记入 detail;
+    #    prebuilt 模式读镜像内 BUILD_VERSION 文件(可能为短 sha 或完整 sha)。
     if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
         if [[ -n "${BOLT_HOME:-}" && -f "${BOLT_HOME}/BUILD_VERSION" ]]; then
             actual="$(tr -d '\r\n' <"${BOLT_HOME}/BUILD_VERSION")"
+            commit=""
         else
             actual=""
         fi
     else
         if [[ -d "${BOLT_SOURCE_DIR}/.git" ]]; then
-            actual="$(git -C "${BOLT_SOURCE_DIR}" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-            commit="$(git -C "${BOLT_SOURCE_DIR}" rev-parse --short HEAD 2>/dev/null || true)"
+            actual="$(bolt_effective_ref 2>/dev/null || true)"
+            commit="$(bolt_full_commit 2>/dev/null || true)"
         else
             actual=""
         fi
     fi
-    if [[ "${actual}" == "${SOFTWARE_VERSION}" ]]; then
+    if bolt_version_accepts "${actual}"; then
         version_status="passed"
-        version_detail="ref=${actual}${commit:+, commit=${commit}}"
+        if [[ -n "${commit}" ]]; then
+            version_detail="ref=${actual}, commit=${commit}"
+        else
+            version_detail="BUILD_VERSION=${actual}"
+        fi
     else
         version_detail="Bolt ${actual:-unknown}, expected ${SOFTWARE_VERSION}"
     fi
