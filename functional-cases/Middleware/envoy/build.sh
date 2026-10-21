@@ -76,19 +76,26 @@ copy_or_download_verified_file() {
 }
 
 install_release_artifacts() {
-    local arch asset sha256 url
+    local arch asset sha256 url suffix
     arch="$(normalize_arch "${EXPECTED_ARCH}")"
     case "${arch}" in
-        x86_64)
-            asset="envoy-${SOFTWARE_VERSION}-linux-x86_64"
-            sha256="002c6e1c69ed0fa0ea381887247cadadfaec9481375fa8d8d2b1731eeabf40b8"
-            ;;
-        aarch64)
-            asset="envoy-${SOFTWARE_VERSION}-linux-aarch_64"
-            sha256="8565ad0af4b1d1d3c986e5165c027add3073579182f398dd7f4d728d25e9ec62"
-            ;;
+        x86_64) suffix="x86_64" ;;
+        aarch64) suffix="aarch_64" ;;
         *)
             log "ERROR: no verified Envoy release asset is declared for ${EXPECTED_ARCH}"
+            return 10
+            ;;
+    esac
+    asset="envoy-${SOFTWARE_VERSION}-linux-${suffix}"
+    # 官方资产按版本逐次变化,SHA-256 必须按 版本/架构 精确匹配,
+    # 取值来自各 release 的 checksums.txt.asc。
+    case "${SOFTWARE_VERSION}/${arch}" in
+        1.40.0/x86_64) sha256="8aa137a7d00994ce43f613556f5a120709229f63bedb86eedde5ccbc402c2b80" ;;
+        1.40.0/aarch64) sha256="03cacc952561635c0b7d2a829291f341dadbebc32050475efbe7321b1bbe18c2" ;;
+        1.37.1/x86_64) sha256="8db90ee0aa085ae6873dbf21212816d29f6c455d4760c4aecf4d6593763db18c" ;;
+        1.37.1/aarch64) sha256="65811e12ae8f79d4f4f6418d27a2d32febc4cc8a5233d5ae8a4da0e3e0f3fe75" ;;
+        *)
+            log "ERROR: no verified SHA-256 for envoy ${SOFTWARE_VERSION} on ${EXPECTED_ARCH}"
             return 10
             ;;
     esac

@@ -4,7 +4,7 @@ name: envoy
 category: Middleware
 enabled: true
 
-# 人工指定的待测版本:与性能用例 software/Middleware/envoy/case.yaml 保持一致。
+# 人工指定的待测版本:由人工维护,不要求与性能用例 software/Middleware/envoy/case.yaml 的版本列表一致。
 versions:
   - "1.40.0"
   - "1.37.1"
