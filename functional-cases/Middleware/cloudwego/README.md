@@ -35,16 +35,16 @@ CLI 版本来自对应标签内工具自身的版本常量，因此与源码标�
 
 ## check 阶段：输入、动作与通过条件
 
-| 顺序 | 检查名 | 检查原理和通过条件 |
-| --- | --- | --- |
-| 1 | `source-integrity` | 对四份保留的源码归档重新核对标签及 SHA-256；四份均匹配 [锁定清单](source-lock.json) 才通过。 |
-| 2 | `version` | 实际运行 `kitex --version`、`hz --version`、`volo --version`，从输出中解析版本号并与上表分别比对；Eino 检查本次解压源码记录的标签 `v0.9.22`。任一命令失败或版本不符即失败。 |
-| 3 | `upstream-test` | 在 Kitex 源码中执行 `go test -count=1 -timeout 5m ./client/...`，在 Hertz 源码中执行 `go test -count=1 -timeout 5m ./pkg/...`。两组均退出成功才通过；`-count=1` 禁用 Go 测试结果缓存。这是选定子树，不是两仓库的全量测试。 |
-| 4 | `smoke` | 在 Hertz 源码模块中生成最小 HTTP 程序，启动绑定本机临时端口的 Hertz 服务，标准库客户端请求 `GET /ping`。须在 10 秒内连通、返回 HTTP 200，且 JSON 中 `ping` 字段精确为 `pong`；单次请求超时 2 秒。 |
-| 5 | `codegen` | 写入本地 `echo.thrift`：`Request`/`Response` 都含字符串 `message`，服务 `Echo.Ping` 接收请求并返回响应，带 `/ping` 的 HTTP 注解。分别运行实际 `kitex`、`hz`、`volo` CLI。Kitex 的 `kitex_gen/echo/echo.go`、hz 的 `main.go`、Volo 的 `Cargo.toml` 和 `src/lib.rs` 均须非空。这里只证明生成命令完成并产出关键文件；下一项验证可编译性。 |
-| 6 | `generated-build` | 在刚生成的 Kitex/hz 项目中，把框架模块版本设为本次固定标签，并 `replace` 到本次下载的源码，执行 `go mod tidy`、`go build -mod=readonly ./...`。对 Volo，先用 [pin_generated.py](pin_generated.py) 把生成项目中的 `volo`、`volo-thrift`、`volo-build` 通配依赖改为本次源码路径，并将 `pilota`、`anyhow`、`tokio` 固定到 Volo 源码 `Cargo.lock` 中的版本；再基于该锁文件解析生成项目依赖，最后 `cargo build --locked`。三个项目均编译成功才通过。解析生成项目时可能更新间接依赖的锁定条目，因此这不是对完整依赖图逐字节复现的证明。 |
-| 7 | `kitex-rpc` | 将 [RPC 测试](kitex_rpc_test.go) 放入刚生成的 Kitex 项目，启动由生成服务代码实现的 `Echo.Ping`，监听 `127.0.0.1` 临时 TCP 端口。生成客户端真实发起 `hello`、`中文 RPC`、空字符串三次调用；每次返回值必须精确等于 `reply:` 加原消息。Go 测试使用 `-count=1`、30 秒超时；客户端单次 RPC 超时 1 秒，整个测试上下文 10 秒。结束时停止服务并等待退出。 |
-| 8 | `eino-test` | 在 Eino 固定源码中执行 `go test -count=1 -timeout 5m ./schema/... ./components/prompt/...`。两组离线测试退出成功才通过，不调用外部模型 API；不覆盖 Eino 全部组件。 |
+| 顺序 | 检查名 | 输入 | 执行动作 | 通过条件 |
+| --- | --- | --- | --- | --- |
+| 1 | `source-integrity` | 安装阶段保留的四份源码归档、[锁定清单](source-lock.json) | 重新核对每个组件的标签与归档 SHA-256。 | 四份归档均存在，标签和摘要均与清单一致。 |
+| 2 | `version` | 实际 `kitex`、`hz`、`volo` CLI，解压后的 Eino 源码 | 执行三个 CLI 的 `--version`，解析输出中的版本号；读取 Eino 的源码标签记录。 | 三个 CLI 均可运行、版本号分别匹配上表，Eino 标签为 `v0.9.22`。 |
+| 3 | `upstream-test` | 固定标签的 Kitex 与 Hertz 源码 | 分别运行 Kitex `go test -count=1 -timeout 5m ./client/...` 和 Hertz `go test -count=1 -timeout 5m ./pkg/...`。`-count=1` 禁用测试结果缓存。 | 两组测试均在限定时间内成功退出。这里只覆盖选定子树，不是全量上游测试。 |
+| 4 | `smoke` | Hertz 源码模块中的临时 HTTP 程序 | 在本机临时端口启动 Hertz 服务，标准库客户端请求 `GET /ping`；等待服务最多 10 秒，单次请求超时 2 秒。 | 请求成功、HTTP 状态码为 200，且 JSON 的 `ping` 字段精确等于 `pong`。 |
+| 5 | `codegen` | 本地 `echo.thrift`，实际 `kitex`、`hz`、`volo` CLI | IDL 定义含 `message` 字段的请求/响应、`Echo.Ping` 服务及 `/ping` HTTP 注解；依次调用三个 CLI 生成项目。 | 三个生成命令均成功，Kitex 的 `kitex_gen/echo/echo.go`、hz 的 `main.go`、Volo 的 `Cargo.toml` 和 `src/lib.rs` 均非空。下一项才验证可编译性。 |
+| 6 | `generated-build` | 上一步生成的三个项目、本次固定源码、Volo 源码的 `Cargo.lock` | Kitex/hz 项目将框架模块 `replace` 到本次源码，执行 `go mod tidy` 和 `go build -mod=readonly ./...`。Volo 项目经 [pin_generated.py](pin_generated.py) 将 `volo`、`volo-thrift`、`volo-build` 指向本次源码，将 `pilota`、`anyhow`、`tokio` 固定到源码锁文件中的版本，再解析依赖并执行 `cargo build --locked`。 | 三个生成项目均编译成功。生成项目解析时可能更新间接依赖的锁定条目，不能据此证明完整依赖图逐字节复现。 |
+| 7 | `kitex-rpc` | 生成的 Kitex 服务与客户端代码、[RPC 测试](kitex_rpc_test.go) | 在 `127.0.0.1` 临时 TCP 端口启动 `Echo.Ping`；客户端依次发送 `hello`、`中文 RPC`、空字符串。测试使用 `-count=1`、30 秒超时，单次 RPC 超时 1 秒，整体上下文超时 10 秒；结束时停止服务。 | 三次调用均成功，响应分别精确等于 `reply:` 加原消息，服务在 5 秒内退出。 |
+| 8 | `eino-test` | 固定标签的 Eino 源码 | 离线执行 `go test -count=1 -timeout 5m ./schema/... ./components/prompt/...`，不调用外部模型 API。 | 两组测试均在限定时间内成功退出；不代表 Eino 全组件通过。 |
 
 `codegen` 只检查关键文件存在，不能代替生成项目编译；`generated-build` 只验证编译，不能代替 Kitex 的真实 RPC 回环。三项连起来分别覆盖工具调用、生成代码的可编译性和实际服务交互。Hertz 的实际交互由独立 `smoke` 项覆盖；Volo 当前覆盖生成与编译，未运行 Volo RPC 服务。
 
