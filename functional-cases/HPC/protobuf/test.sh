@@ -24,7 +24,8 @@ run_protoc_roundtrip() {
     "${PROTOC_BIN}" -I "${inc}" --decode=google.protobuf.FileDescriptorSet "${proto}" \
         <"${RESULTS_DIR}/descriptor_set.pb" >"${RESULTS_DIR}/descriptor_set.txt" || return 1
     [[ -s "${RESULTS_DIR}/descriptor_set.pb" ]] || return 1
-    grep -q '^name:' "${RESULTS_DIR}/descriptor_set.txt" || return 1
+    # --decode 输出为缩进文本,字段行形如 '  name: "..."',因此不能锚定行首。
+    grep -q '^[[:space:]]*name:' "${RESULTS_DIR}/descriptor_set.txt" || return 1
 }
 
 # 生成 C++ 代码 + 编译链接 libprotobuf 的最小 roundtrip。
@@ -65,7 +66,7 @@ CPP
     cat >"${dir}/CMakeLists.txt" <<'CMAKE'
 cmake_minimum_required(VERSION 3.10)
 project(pb_roundtrip CXX)
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Protobuf REQUIRED)
 protobuf_generate_cpp(PB_SRCS PB_HDRS message.proto)

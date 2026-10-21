@@ -5,7 +5,7 @@ category: HPC
 enabled: true
 
 # build 模式(ubuntu 基础镜像内)分层优先获取:层1 官方 protoc 预编译二进制 release 资产 →
-#   层2 apt 中版本严格等于 33.0 的 protobuf 包 → 层3 源码编译;每层产物都校验 protoc 版本。
+#   层2 apt 中版本严格等于目标版本的 protobuf 包 → 层3 源码编译;每层产物都校验 protoc 版本。
 
 # 人工指定的待测版本(白名单),与 software/HPC/protobuf/case.yaml 保持一致。
 versions:
