@@ -215,7 +215,7 @@ software:
     channels: {pypi: null, conda: "conda-forge/gcc_impl_linux-64", apt: gcc, docker: "library/gcc", spack: gcc}
     arm64_binary: yes
     auto_latest: none
-    note: "官方仅源码;library/gcc 镜像含 arm64v8"
+    note: "官方仅源码;library/gcc 镜像含 arm64v8;发行版归档的 gcc .deb 亦可直接解包使用"
   golang:
     category: Toolchain
     primary: {type: upstream-tarball, ref: "https://go.dev/dl/"}

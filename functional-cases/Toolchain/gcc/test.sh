@@ -31,7 +31,7 @@ C
 
 # 编译并运行一个 C++ 程序。
 run_cxx_compile() {
-    local dir="${PERF_WORK_DIR}/smoke"
+    local dir="${PERF_WORK_DIR}/smoke" libstdcxx candidate libdir=""
     mkdir -p "${dir}"
     cat >"${dir}/hello.cpp" <<'CPP'
 #include <iostream>
@@ -45,10 +45,19 @@ int main() {
     return 0;
 }
 CPP
+    # 预构建镜像把 gcc 装在 /usr/local/gcc,自带的新版 libstdc++ 不在系统默认库路径上;
+    # 直接运行会命中系统旧 libstdc++ 并报 GLIBCXX_x.y.z not found。
+    # 用编译器自报的 libstdc++ 路径作为运行期库目录。
+    for candidate in libstdc++.so.6 libstdc++.so; do
+        libstdcxx="$("${GXX_BIN}" -print-file-name="${candidate}" 2>/dev/null || true)"
+        [[ "${libstdcxx}" == /* && -e "${libstdcxx}" ]] || continue
+        libdir="$(dirname "${libstdcxx}")"
+        break
+    done
     (
         cd "${dir}"
         "${GXX_BIN}" -std=c++17 -O2 -o hello_cxx hello.cpp
-        ./hello_cxx | grep -qx hello-gccxx-10
+        LD_LIBRARY_PATH="${libdir:+${libdir}:}${LD_LIBRARY_PATH:-}" ./hello_cxx | grep -qx hello-gccxx-10
     )
 }
 

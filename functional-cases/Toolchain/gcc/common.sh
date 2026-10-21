@@ -234,6 +234,7 @@ install_os_packages() {
             gmp) rhel+=(gmp-devel); debian+=(libgmp-dev) ;;
             mpfr) rhel+=(mpfr-devel); debian+=(libmpfr-dev) ;;
             mpc) rhel+=(libmpc-devel); debian+=(libmpc-dev) ;;
+            dpkg) debian+=(dpkg) ;;
             *)
                 log "ERROR: unknown logical package: ${logical}"
                 return 30
@@ -241,7 +242,10 @@ install_os_packages() {
         esac
     done
     family="$(os_family)"
-    (( ${#rhel[@]} == 0 )) && return 0
+    # 只登记了 debian 侧的逻辑包时 rhel 数组为空,不能因此跳过安装。
+    if (( ${#rhel[@]} == 0 && ${#debian[@]} == 0 )); then
+        return 0
+    fi
     case "${family}" in
         rhel)
             log "installing via dnf: ${rhel[*]}"
