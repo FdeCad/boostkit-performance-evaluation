@@ -277,6 +277,8 @@ detect_brpc_version() {
         "/usr/local/share/brpc/RELEASE_VERSION"
         "/opt/brpc/RELEASE_VERSION"
         "/usr/src/brpc/RELEASE_VERSION"
+        # 预构建镜像把源码树放在 /brpc,版本证据只在源码根目录。
+        "/brpc/RELEASE_VERSION"
     )
     for file in "${candidates[@]}"; do
         if [[ -f "${file}" ]]; then
@@ -311,6 +313,8 @@ resolve_brpc_source_tree() {
         "/opt/brpc"
         "/usr/src/brpc"
         "/usr/local/src/brpc"
+        # 预构建镜像内置的源码树。
+        "/brpc"
         "${HOME:-/root}/brpc"
     )
     for candidate in "${candidates[@]}"; do
