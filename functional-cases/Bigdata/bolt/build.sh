@@ -194,23 +194,57 @@ install_bolt_build() {
     return 40
 }
 
+# prebuilt:镜像未随带测试树时,在其自带源码树上补建上游测试
+# (上游官方 release_with_test 目标 = release 全部选项 + skip_test=False + enable_testutil=True)。
+# 被测代码与工具链均来自镜像,依赖命中镜像内 conan 缓存;但 conan options 变化会
+# 触发 bolt 本体重编 + 测试二进制编译,每次运行重复付出,这是兜底方案的已知代价
+# (镜像方改用 release_with_test 构建即可免除)。
+ensure_prebuilt_test_tree() {
+    local tree
+    if tree="$(find_ctest_tree 2>/dev/null || true)" && [[ -n "${tree}" ]]; then
+        log "image test tree present: ${tree}; no bootstrap build needed"
+        return 0
+    fi
+    local -a missing=()
+    command -v make >/dev/null 2>&1 || missing+=(make)
+    command -v conan >/dev/null 2>&1 || missing+=(conan)
+    command -v git >/dev/null 2>&1 || missing+=(git)
+    command -v c++ >/dev/null 2>&1 || missing+=(c++)
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log "WARNING: image has no test tree and lacks toolchain (${missing[*]}); upstream-unit-test will be reported as skipped"
+        return 0
+    fi
+    log "image ships no test tree; building upstream tests from the image's own source tree at ${BOLT_HOME} (upstream release_with_test target; deps hit the image's conan cache)"
+    (cd "${BOLT_HOME}" && make release_with_test BUILD_VERSION="${SOFTWARE_VERSION}") || {
+        log "ERROR: in-image bootstrap build of the upstream test tree failed"
+        return 40
+    }
+    log "in-image test tree build finished"
+}
+
 func_install() {
     initialize_runtime || return $?
     check_architecture || return $?
 
     local actual
     if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
-        # 镜像已装好:定位构建产物并用版本标记文件校验,不做任何构建。
+        # 镜像已装好:定位构建产物并校验版本;测试树缺失时在其源码树上补建(见下)。
         BOLT_HOME="$(resolve_bolt_root || true)"
         [[ -n "${BOLT_HOME}" && -d "${BOLT_HOME}" ]] || {
-            log "ERROR: prebuilt Bolt is not present in the software image (checked /opt/bolt, /usr/local/bolt, /usr/lib/bolt, ~/bolt and BUILD_VERSION markers under common prefixes; image must ship the built Bolt tree)"
+            log "ERROR: prebuilt Bolt is not present in the software image (checked /workspace/bolt, /opt/bolt, /usr/local/bolt, /usr/lib/bolt, ~/bolt, BUILD_VERSION markers and bolt source trees under common prefixes; image must ship the built Bolt tree)"
             return 40
         }
         require_test_commands || return $?
+        # 版本证据两级:BUILD_VERSION 文件 → 源码树 git HEAD(镜像常为完整
+        # clone+checkout 检出,短 sha 即版本基线,与请求值前缀互认)。
         if [[ -f "${BOLT_HOME}/BUILD_VERSION" ]]; then
             actual="$(tr -d '\r\n' <"${BOLT_HOME}/BUILD_VERSION")"
+            log "prebuilt version from BUILD_VERSION file: ${actual}"
+        elif ref="$(bolt_effective_ref "${BOLT_HOME}" 2>/dev/null)" && [[ -n "${ref}" ]]; then
+            actual="${ref}"
+            log "prebuilt version from source-tree git HEAD: ${actual} (commit $(bolt_full_commit "${BOLT_HOME}" 2>/dev/null || true))"
         else
-            log "ERROR: cannot determine the prebuilt Bolt version (missing ${BOLT_HOME}/BUILD_VERSION)"
+            log "ERROR: cannot determine the prebuilt Bolt version (no BUILD_VERSION file and no git source tree under ${BOLT_HOME})"
             return 40
         fi
     else
@@ -222,12 +256,15 @@ func_install() {
         log "Bolt ${actual} built at commit $(bolt_full_commit 2>/dev/null || true)"
     fi
 
-    # prebuilt(actual = 镜像内 BUILD_VERSION)与 build(actual = ref/短 sha)统一用
-    # 共享匹配语义:精确相等,或短 sha 与完整 sha 互为前缀。
+    # prebuilt(actual = 镜像内 BUILD_VERSION 或源码树 git HEAD)与
+    # build(actual = ref/短 sha)统一用共享匹配语义:精确相等,或短 sha 与完整 sha 互为前缀。
     bolt_version_accepts "${actual}" || {
         log "ERROR: Bolt ${actual:-unknown}, expected ${SOFTWARE_VERSION}"
         return 40
     }
+    if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
+        ensure_prebuilt_test_tree || return $?
+    fi
     mkdir -p "$(dirname "${PERF_ACTUAL_VERSION_FILE}")"
     printf '%s\n' "${actual}" >"${PERF_ACTUAL_VERSION_FILE}" || return 40
     log "Bolt ${actual} ready (mode=${FUNC_MODE})"

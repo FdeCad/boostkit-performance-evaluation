@@ -82,6 +82,7 @@ resolve_bolt_root() {
     local candidate found
     local -a candidates=(
         "${BOLT_HOME_OVERRIDE:-}"
+        "/workspace/bolt"
         "/opt/bolt"
         "/usr/local/bolt"
         "/usr/lib/bolt"
@@ -93,8 +94,7 @@ resolve_bolt_root() {
             return 0
         fi
     done
-    # 镜像布局无法事先约定:按上游构建体系的版本标记文件搜索兜底
-    # (BUILD_VERSION 是上游 Makefile 的构建参数文件,预构建镜像应随构建产物保留)。
+    # 策略 1:BUILD_VERSION 标记(镜像按约定提供时最可靠)。
     # -xdev 跳过 /proc /sys 等伪文件系统;独立挂载点(如 /home /data)补搜一轮。
     found="$(find / -xdev -maxdepth 5 -type f -name BUILD_VERSION 2>/dev/null | head -n 1 || true)"
     if [[ -z "${found}" ]]; then
@@ -105,28 +105,59 @@ resolve_bolt_root() {
         printf '%s\n' "$(dirname "${found}")"
         return 0
     fi
+    # 策略 2:上游源码树发现(镜像常为 git clone + checkout 布局,
+    # 目录名 bolt 且根目录有 CMakeLists.txt)。
+    found="$(find / -xdev -maxdepth 4 -type d -name bolt \
+        -exec test -f '{}/CMakeLists.txt' ';' -print 2>/dev/null | head -n 1 || true)"
+    if [[ -z "${found}" ]]; then
+        found="$(find /home /root /srv /data /workspace /mnt /media -maxdepth 4 \
+            -type d -name bolt -exec test -f '{}/CMakeLists.txt' ';' -print 2>/dev/null | head -n 1 || true)"
+    fi
+    if [[ -n "${found}" ]]; then
+        printf '%s\n' "${found}"
+        return 0
+    fi
     return 1
+}
+
+# 定位含 CTestTestfile.cmake 的构建树(build 模式用 BOLT_BUILD_DIR;
+# prebuilt 模式在镜像源码树 BOLT_HOME 下自动发现,深度 4 覆盖 /workspace/bolt/_build/Release)。
+# 纯输出,供命令替换调用。
+find_ctest_tree() {
+    local marker
+    if [[ -n "${BOLT_BUILD_DIR:-}" && -f "${BOLT_BUILD_DIR}/CTestTestfile.cmake" ]]; then
+        printf '%s\n' "${BOLT_BUILD_DIR}"
+        return 0
+    fi
+    [[ -n "${BOLT_HOME:-}" && -d "${BOLT_HOME}" ]] || return 1
+    marker="$(find "${BOLT_HOME}" -maxdepth 4 -type f -name CTestTestfile.cmake 2>/dev/null | head -n 1 || true)"
+    [[ -n "${marker}" ]] || return 1
+    printf '%s\n' "$(dirname "${marker}")"
 }
 
 # ---------- 版本标识与匹配(上游无 tag,版本基线 = git ref / commit) ----------
 
-# 读取当前源码树的版本标识:分支检出返回分支名;detached HEAD(按 commit 测试)
-# 返回短 commit sha(rev-parse --abbrev-ref 此时只会返回字面量 "HEAD")。
+# 读取源码树的版本标识(可选目录参数,缺省 build 模式的 BOLT_SOURCE_DIR):
+# 分支检出返回分支名;detached HEAD(按 commit 测试)返回短 commit sha
+# (rev-parse --abbrev-ref 此时只会返回字面量 "HEAD")。prebuilt 模式可传
+# 镜像内源码树目录以读取其 git HEAD 作为版本证据。
 bolt_effective_ref() {
-    [[ -d "${BOLT_SOURCE_DIR}/.git" ]] || return 1
+    local dir="${1:-${BOLT_SOURCE_DIR:-}}"
+    [[ -n "${dir}" && -d "${dir}/.git" ]] || return 1
     local ref
-    ref="$(git -C "${BOLT_SOURCE_DIR}" rev-parse --abbrev-ref HEAD 2>/dev/null)" || return 1
+    ref="$(git -C "${dir}" rev-parse --abbrev-ref HEAD 2>/dev/null)" || return 1
     if [[ "${ref}" != "HEAD" ]]; then
         printf '%s\n' "${ref}"
         return 0
     fi
-    git -C "${BOLT_SOURCE_DIR}" rev-parse --short HEAD 2>/dev/null
+    git -C "${dir}" rev-parse --short HEAD 2>/dev/null
 }
 
 # 读取完整 commit sha(无源码树或读取失败时返回非零)。
 bolt_full_commit() {
-    [[ -d "${BOLT_SOURCE_DIR}/.git" ]] || return 1
-    git -C "${BOLT_SOURCE_DIR}" rev-parse HEAD 2>/dev/null
+    local dir="${1:-${BOLT_SOURCE_DIR:-}}"
+    [[ -n "${dir}" && -d "${dir}/.git" ]] || return 1
+    git -C "${dir}" rev-parse HEAD 2>/dev/null
 }
 
 # 请求版本与实际值匹配:精确相等,或两者均为 7~40 位 hex sha 且互为前缀

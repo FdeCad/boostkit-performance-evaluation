@@ -16,28 +16,24 @@ find_bolt_lib() {
     local -a roots=("${BOLT_BUILD_DIR:-}" "${BOLT_HOME:-}" "${BOLT_SOURCE_DIR:-}")
     for root in "${roots[@]}"; do
         [[ -n "${root}" && -d "${root}" ]] || continue
-        lib="$(find "${root}" -type f -name 'libbolt*.so*' 2>/dev/null | sort | head -n 1 || true)"
-        if [[ -n "${lib}" ]]; then
-            printf '%s\n' "${lib}"
+        local -a libs=()
+        mapfile -t libs < <(find "${root}" -type f \( -name 'libbolt*.so*' -o -name 'libbolt*.a' \) 2>/dev/null | sort || true)
+        # 优先共享库(ldd 证据更强);conan 默认产物是静态库,回退 libbolt*.a。
+        for lib in "${libs[@]}"; do
+            if [[ "${lib}" == *.so* ]]; then
+                printf '%s\n' "${lib}"
+                return 0
+            fi
+        done
+        if [[ -n "${libs[0]:-}" ]]; then
+            printf '%s\n' "${libs[0]}"
             return 0
         fi
     done
     return 1
 }
 
-# 定位含 CTestTestfile.cmake 的构建树(build 模式用 BOLT_BUILD_DIR;
-# prebuilt 镜像若随带测试树则在 BOLT_HOME 下自动发现)。纯输出,供命令替换调用。
-find_ctest_tree() {
-    local marker
-    if [[ -n "${BOLT_BUILD_DIR:-}" && -f "${BOLT_BUILD_DIR}/CTestTestfile.cmake" ]]; then
-        printf '%s\n' "${BOLT_BUILD_DIR}"
-        return 0
-    fi
-    [[ -n "${BOLT_HOME:-}" && -d "${BOLT_HOME}" ]] || return 1
-    marker="$(find "${BOLT_HOME}" -maxdepth 4 -type f -name CTestTestfile.cmake 2>/dev/null | head -n 1 || true)"
-    [[ -n "${marker}" ]] || return 1
-    printf '%s\n' "$(dirname "${marker}")"
-}
+# find_ctest_tree 已上移至 common.sh(build 模式与 prebuilt 补建逻辑共用)。
 
 write_functional_result() {
     local overall="$1" v_status="$2" v_detail="$3" u_status="$4" u_detail="$5" c_status="$6" c_detail="$7"
@@ -86,11 +82,17 @@ func_check() {
     #    actual = 短 commit sha(见 common.sh bolt_effective_ref),完整 sha 记入 detail;
     #    prebuilt 模式读镜像内 BUILD_VERSION 文件(可能为短 sha 或完整 sha)。
     if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
+        # 版本证据两级:镜像按约定提供的 BUILD_VERSION 文件 → 源码树 git HEAD
+        # (镜像常为完整 clone+checkout 检出,短 sha 即版本基线)。
         if [[ -n "${BOLT_HOME:-}" && -f "${BOLT_HOME}/BUILD_VERSION" ]]; then
             actual="$(tr -d '\r\n' <"${BOLT_HOME}/BUILD_VERSION")"
             commit=""
+        elif [[ -n "${BOLT_HOME:-}" ]]; then
+            actual="$(bolt_effective_ref "${BOLT_HOME}" 2>/dev/null || true)"
+            commit="$(bolt_full_commit "${BOLT_HOME}" 2>/dev/null || true)"
         else
             actual=""
+            commit=""
         fi
     else
         if [[ -d "${BOLT_SOURCE_DIR}/.git" ]]; then
@@ -144,10 +146,18 @@ func_check() {
         fi
     fi
 
-    # 3) 最小可用性冒烟:构建产物 libbolt*.so 可被动态链接器加载。
+    # 3) 最小可用性冒烟:构建产物 libbolt*.so 可被动态链接器加载;静态库(libbolt*.a)
+    #    无动态加载语义,以 ar 归档完整性检查替代(conan 默认产物为静态库)。
     lib="$(find_bolt_lib || true)"
     if [[ -z "${lib}" ]]; then
-        smoke_detail="no libbolt*.so artifact found; full job execution needs the Spark/Gluten backend (out of scope)"
+        smoke_detail="no libbolt artifact found (libbolt*.so / libbolt*.a); full job execution needs the Spark/Gluten backend (out of scope)"
+    elif [[ "${lib}" == *.a ]]; then
+        if ar t "${lib}" >>"${RESULTS_DIR}/bolt_test.log" 2>&1; then
+            smoke_status="passed"
+            smoke_detail="static library archive is intact (ar t): ${lib} (full Spark/Gluten job execution is out of scope)"
+        else
+            smoke_detail="static library archive check failed: ${lib}; see bolt_test.log"
+        fi
     elif ldd "${lib}" >>"${RESULTS_DIR}/bolt_test.log" 2>&1; then
         smoke_status="passed"
         smoke_detail="native library loads cleanly: ${lib} (full Spark/Gluten job execution is out of scope)"
