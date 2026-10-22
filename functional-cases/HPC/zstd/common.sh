@@ -96,14 +96,21 @@ configure_runtime_paths() {
 
     # 两种模式都需要一份源码树来跑上游 playTests.sh:
     #   prebuilt - 镜像内 zstd CLI + 浅克隆的测试树(测试树里只编译 datagen)。
-    #   build    - 本次克隆并编译出的 zstd 与源码树。
+    #   build    - 发行版仓库的 zstd(未命中则源码编译出的 zstd)+ 源码树(内含 datagen)。
     ZSTD_TEST_TREE="${PERF_WORK_DIR}/zstd-source"
     if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
         ZSTD_BIN="$(command -v zstd 2>/dev/null || true)"
         ZSTD_SOURCE_DIR=""
     else
         ZSTD_SOURCE_DIR="${PERF_WORK_DIR}/zstd-source"
-        ZSTD_BIN="${ZSTD_SOURCE_DIR}/programs/zstd"
+        # build 模式的被测二进制可能是发行版仓库层(装在 PATH)或源码编译层(树内 programs/zstd)。
+        # 源码树有编译产物时优先用它,否则取 PATH 上的 zstd;install 与 check 阶段推导结果一致。
+        if [[ -x "${ZSTD_SOURCE_DIR}/programs/zstd" ]]; then
+            ZSTD_BIN="${ZSTD_SOURCE_DIR}/programs/zstd"
+        else
+            ZSTD_BIN="$(command -v zstd 2>/dev/null || true)"
+            [[ -n "${ZSTD_BIN}" ]] || ZSTD_BIN="${ZSTD_SOURCE_DIR}/programs/zstd"
+        fi
     fi
     ZSTD_DATAGEN_BIN="${ZSTD_TEST_TREE}/tests/datagen"
     SERVICE_DIR="${PERF_WORK_DIR}/data"
@@ -163,6 +170,7 @@ install_os_packages() {
             tar) rhel+=(tar); debian+=(tar) ;;
             diffutils) rhel+=(diffutils); debian+=(diffutils) ;;
             gzip) rhel+=(gzip); debian+=(gzip) ;;
+            zstd) rhel+=(zstd); debian+=(zstd) ;;
             *)
                 log "ERROR: unknown logical package: ${logical}"
                 return 30

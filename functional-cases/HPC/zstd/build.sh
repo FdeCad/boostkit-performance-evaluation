@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Zstd 构建脚本:环境采集 + 准备被测软件(构建或定位)。
 #   FUNC_MODE=prebuilt - 定位镜像内 zstd CLI,浅克隆上游源码树并编译 tests/datagen 供上游套件使用
-#   FUNC_MODE=build    - 分层获取:上游/三方均无所需精确版本二进制,降级为源码编译
+#   FUNC_MODE=build    - 分层获取:优先发行版仓库的精确版本 zstd,未命中再回退源码编译
 #
 # build 模式的分层优先获取分析(优先级从高到低):
 #   层1 上游官方二进制:不可用。zstd GitHub releases 只发布源码 tarball,不提供 Linux 预编译二进制。
-#   层2 三方仓库已打包的精确版本包:不可用。apt/conda-forge 的 zstd 版本往往滞后于 ${SOFTWARE_VERSION},
-#         无法保证严格相等;且功能判定要跑上游 tests/playTests.sh 套件,仍需完整源码树与 tests/datagen。
-#   层3 源码编译:唯一可行层 —— 克隆 v<version> tag 并编译(含源码树内的测试工具)。
-#   每层产物都需校验版本 == SOFTWARE_VERSION;此处仅层3 可用,故 build 模式直接源码编译。
+#   层2 发行版仓库已打包的精确版本包:视发行版而定。Ubuntu 26.04 仓库的 zstd 为 1.5.7
+#         (源码包 libzstd 1.5.7+dfsg-3),与待测版本严格相等,可直接命中;发行版滞后时未命中,
+#         自动回退层3。命中后仍保留源码树,因为上游 playTests.sh 需要 tests/datagen。
+#   层3 源码编译:克隆 v<version> tag 并编译,兜底层。
+#   每层产物都需校验版本 == SOFTWARE_VERSION。
 # 暴露给 Framework 的阶段:prepare、install。独立执行时依次运行这两个阶段。
 set -euo pipefail
 
@@ -81,6 +82,31 @@ build_zstd_datagen() {
     }
 }
 
+# 层2:发行版仓库已打包的 zstd CLI。命中条件:包内 zstd 版本严格等于 SOFTWARE_VERSION。
+# 未安装时先按发行版安装;版本不符视为未命中,由调用方回退源码编译层。
+install_distro_zstd() {
+    local candidate actual
+    if ! command -v zstd >/dev/null 2>&1; then
+        log "trying distro package layer: install zstd from the OS repository"
+        install_os_packages zstd || {
+            log "distro package layer unavailable"
+            return 1
+        }
+        command -v zstd >/dev/null 2>&1 || {
+            log "distro package layer missed: zstd CLI not found after install"
+            return 1
+        }
+    fi
+    candidate="$(command -v zstd)"
+    actual="$(read_zstd_version "${candidate}")"
+    [[ "${actual}" == "${SOFTWARE_VERSION}" ]] || {
+        log "distro package layer missed: ${candidate} reports v${actual:-unknown}, expected ${SOFTWARE_VERSION}"
+        return 1
+    }
+    ZSTD_BIN="${candidate}"
+    log "distro package layer hit: ${candidate} (v${actual})"
+}
+
 func_install() {
     initialize_runtime || return $?
     check_architecture || return $?
@@ -96,16 +122,23 @@ func_install() {
         build_zstd_datagen "${ZSTD_TEST_TREE}" || return $?
     else
         require_build_commands || return $?
-        clone_zstd_tree "${ZSTD_SOURCE_DIR}" || return $?
-        log "building zstd"
-        make -C "${ZSTD_SOURCE_DIR}" -j"$(nproc)" || {
-            log "ERROR: zstd build failed"
-            return 40
-        }
-        [[ -x "${ZSTD_BIN}" ]] || {
-            log "ERROR: zstd CLI was not produced: ${ZSTD_BIN}"
-            return 40
-        }
+        if install_distro_zstd; then
+            # 命中发行版仓库层也要源码树:上游 playTests.sh 依赖树内的 tests/datagen。
+            clone_zstd_tree "${ZSTD_TEST_TREE}" || return $?
+        else
+            log "falling back to source build for zstd ${SOFTWARE_VERSION}"
+            clone_zstd_tree "${ZSTD_SOURCE_DIR}" || return $?
+            log "building zstd"
+            make -C "${ZSTD_SOURCE_DIR}" -j"$(nproc)" || {
+                log "ERROR: zstd build failed"
+                return 40
+            }
+            [[ -x "${ZSTD_SOURCE_DIR}/programs/zstd" ]] || {
+                log "ERROR: zstd CLI was not produced: ${ZSTD_SOURCE_DIR}/programs/zstd"
+                return 40
+            }
+            ZSTD_BIN="${ZSTD_SOURCE_DIR}/programs/zstd"
+        fi
         build_zstd_datagen "${ZSTD_TEST_TREE}" || return $?
     fi
 

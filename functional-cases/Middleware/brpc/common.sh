@@ -259,6 +259,15 @@ require_build_commands() {
         | c++ -x c++ -fsyntax-only - 2>/dev/null; then
         logical+=(leveldb)
     fi
+    # 链接行固定带 -lsnappy / -lz,缺开发包会直接 cannot find -lsnappy。
+    if ! printf '#include <snappy.h>\nint main(){return 0;}\n' \
+        | c++ -x c++ -fsyntax-only - 2>/dev/null; then
+        logical+=(snappy)
+    fi
+    if ! printf '#include <zlib.h>\nint main(){return 0;}\n' \
+        | c++ -x c++ -fsyntax-only - 2>/dev/null; then
+        logical+=(zlib)
+    fi
     (( ${#logical[@]} == 0 )) && return 0
     log "installing missing build dependencies: ${logical[*]}"
     install_os_packages "${logical[@]}" || return 30
