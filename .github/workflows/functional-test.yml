@@ -145,17 +145,20 @@ jobs:
             kunpeng920) [[ -z "${PROXY_KUNPENG920}" ]] || raw="${PROXY_KUNPENG920}" ;;
             kunpeng950) [[ -z "${PROXY_KUNPENG950}" ]] || raw="${PROXY_KUNPENG950}" ;;
           esac
-          # Secret 常带首尾空白/换行或结尾斜杠,先归一化;未写 scheme 时默认 http。
+          # Secret 常带首尾空白/换行、引号或结尾斜杠,先归一化;未写 scheme 时默认 http。
           proxy="${raw//[[:space:]]/}"
+          proxy="${proxy%\"}"; proxy="${proxy#\"}"
+          proxy="${proxy%\'}"; proxy="${proxy#\'}"
           proxy="${proxy%/}"
           if [[ -z "${proxy}" ]]; then
             echo "no proxy configured for ${HARDWARE}"
             exit 0
           fi
           [[ "${proxy}" == http://* || "${proxy}" == https://* ]] || proxy="http://${proxy}"
-          # 允许可选凭据 user:pass@,但必须带端口;格式错误时直接失败,避免后续只看到 TLS 报错。
-          if [[ ! "${proxy}" =~ ^https?://([^@/]+@)?[^@/:]+:[0-9]+$ ]]; then
-            echo "cannot parse proxy for ${HARDWARE}; expected [http://][user:pass@]host:port" >&2
+          # 只校验 scheme 之后存在主机部分;主机名/IPv4/带凭据/IPv6 一律放行,
+          # 避免格式判定误杀导致 cell 在第一步就失败。
+          if [[ ! "${proxy}" =~ ^https?://[^/[:space:]]+$ ]]; then
+            echo "cannot parse proxy for ${HARDWARE}; expected [http://][user:pass@]host[:port]" >&2
             exit 1
           fi
           no_proxy="localhost,127.0.0.1,::1"
@@ -168,7 +171,8 @@ jobs:
             echo "no_proxy=${no_proxy}"
             echo "NO_PROXY=${no_proxy}"
           } >> "${GITHUB_ENV}"
-          echo "proxy configured for ${HARDWARE}: ${proxy}"
+          # 代理地址属敏感信息,只回显是否配置,不输出地址本身。
+          echo "proxy configured for ${HARDWARE}"
       - name: Install framework runtime dependency
         shell: bash
         run: |
