@@ -25,9 +25,6 @@ CEPH_REPO_BASE="${CEPH_REPO_BASE:-https://download.ceph.com}"
 CEPH_TARBALL_URL="${CEPH_TARBALL_URL:-https://download.ceph.com/tarballs}"
 # 预构建镜像若把 Ceph 装在非标准位置,可用 CEPH_BIN_DIR_OVERRIDE 显式指定其 bin 目录。
 CEPH_BIN_DIR_OVERRIDE="${CEPH_BIN_DIR_OVERRIDE:-}"
-# build 模式下由框架从预构建镜像导出的根文件系统(如 Ubuntu 26.04 无对应版本的
-# 发行版 ceph 包);非空时所有 ceph 命令都通过 chroot 在该根文件系统内执行。
-CEPH_ROOTFS="${PERF_IMAGE_ROOTFS:-}"
 
 CEPH_BIN=""
 CEPH_MON_BIN=""
@@ -39,57 +36,21 @@ STANDALONE_KEEP_WORK_DIR=0
 
 log() { printf '[ceph-func] %s\n' "$*"; }
 
-# ceph 命令统一入口:CEPH_ROOTFS 非空时在导出的根文件系统内 chroot 执行。
-ceph_exec() {
-    if [[ -n "${CEPH_ROOTFS}" ]]; then
-        chroot "${CEPH_ROOTFS}" "$@"
-    else
-        "$@"
-    fi
-}
-
-# 解析 ceph 命令路径(ceph-dencoder / monmaptool 等):
-# CEPH_ROOTFS 模式下返回根文件系统内的绝对路径,否则走 PATH 查找。
+# 解析 ceph 命令路径(ceph-dencoder / monmaptool 等)。
 ceph_tool_path() {
-    local name="$1"
-    if [[ -n "${CEPH_ROOTFS}" ]]; then
-        ceph_rootfs_tool "${name}" || return 1
-        return 0
-    fi
-    command -v "${name}" 2>/dev/null
+    command -v "$1" 2>/dev/null
 }
 
-# 判断可执行文件是否可运行:CEPH_ROOTFS 模式下检查根文件系统内的副本。
+# 判断可执行文件是否可运行。
 ceph_bin_exists() {
     local bin="$1"
-    [[ -n "${bin}" ]] || return 1
-    if [[ -n "${CEPH_ROOTFS}" ]]; then
-        [[ -x "${CEPH_ROOTFS}${bin}" ]]
-    else
-        [[ -x "${bin}" ]]
-    fi
+    [[ -n "${bin}" && -x "${bin}" ]]
 }
 
-# 输出 ceph 版本号;CEPH_ROOTFS 模式经 chroot 执行。
+# 输出 ceph 版本号。
 ceph_version_of() {
     local bin="${1:-ceph}"
-    ceph_exec "${bin}" --version 2>/dev/null | sed -n 's/ceph version \([0-9][0-9.]*\).*/\1/p' | head -n 1
-}
-
-# 导出的镜像根文件系统里 /dev 只有空目录,而 chroot 内运行的 ceph 工具可能用到
-# 设备节点;容器没有 mount 权限,这里用 mknod 尽量补齐,失败不影响主流程。
-prepare_rootfs_devices() {
-    [[ -n "${CEPH_ROOTFS}" ]] || return 0
-    mkdir -p "${CEPH_ROOTFS}/dev" "${CEPH_ROOTFS}/tmp" 2>/dev/null || true
-    [[ -e "${CEPH_ROOTFS}/dev/null" ]] ||
-        mknod -m 666 "${CEPH_ROOTFS}/dev/null" c 1 3 2>/dev/null || true
-    [[ -e "${CEPH_ROOTFS}/dev/zero" ]] ||
-        mknod -m 666 "${CEPH_ROOTFS}/dev/zero" c 1 5 2>/dev/null || true
-    [[ -e "${CEPH_ROOTFS}/dev/random" ]] ||
-        mknod -m 666 "${CEPH_ROOTFS}/dev/random" c 1 8 2>/dev/null || true
-    [[ -e "${CEPH_ROOTFS}/dev/urandom" ]] ||
-        mknod -m 666 "${CEPH_ROOTFS}/dev/urandom" c 1 9 2>/dev/null || true
-    return 0
+    "${bin}" --version 2>/dev/null | sed -n 's/ceph version \([0-9][0-9.]*\).*/\1/p' | head -n 1
 }
 
 normalize_arch() {
@@ -138,28 +99,9 @@ check_architecture() {
 }
 
 # 解析 Ceph 客户端与守护进程可执行文件路径(优先镜像内安装)。
-# CEPH_ROOTFS 非空时返回的是根文件系统内的路径(如 /usr/bin/ceph),需配合 ceph_exec 使用。
-ceph_rootfs_tool() {
-    local name="$1" dir
-    for dir in /usr/bin /usr/local/bin /usr/sbin /sbin /opt/ceph/bin; do
-        [[ -x "${CEPH_ROOTFS}${dir}/${name}" ]] || continue
-        printf '%s\n' "${dir}/${name}"
-        return 0
-    done
-    return 1
-}
-
 resolve_ceph_binaries() {
     local name dir
     local -a dirs=("${CEPH_BIN_DIR_OVERRIDE:-}")
-    if [[ -n "${CEPH_ROOTFS}" ]]; then
-        CEPH_BIN="$(ceph_rootfs_tool ceph || true)"
-        [[ -n "${CEPH_BIN}" ]] || return 1
-        CEPH_MON_BIN="$(ceph_rootfs_tool ceph-mon || true)"
-        CEPH_OSD_BIN="$(ceph_rootfs_tool ceph-osd || true)"
-        CEPH_MGR_BIN="$(ceph_rootfs_tool ceph-mgr || true)"
-        return 0
-    fi
     CEPH_BIN="$(command -v ceph 2>/dev/null || true)"
     if [[ -n "${CEPH_BIN}" ]]; then
         dirs=("$(dirname "${CEPH_BIN}")" "${dirs[@]}")
@@ -208,13 +150,12 @@ configure_runtime_paths() {
     export SOFTWARE_NAME CATEGORY SOFTWARE_VERSION EXPECTED_ARCH FUNC_OS FUNC_HARDWARE FUNC_MODE
     export PERF_RUN_ID PERF_WORK_DIR RESULTS_DIR PERF_ACTUAL_VERSION_FILE TMPDIR
     export CEPH_RELEASE CEPH_REPO_BASE CEPH_BIN CEPH_MON_BIN CEPH_OSD_BIN CEPH_MGR_BIN SERVICE_DIR
-    export CEPH_TARBALL_URL CEPH_ROOTFS
+    export CEPH_TARBALL_URL
 }
 
 initialize_runtime() {
     configure_runtime_paths || return $?
     mkdir -p "${RESULTS_DIR}" "${PERF_WORK_DIR}" "${TMPDIR}" "${SERVICE_DIR}"
-    prepare_rootfs_devices
 }
 
 # ---------- OS 感知的依赖安装 ----------

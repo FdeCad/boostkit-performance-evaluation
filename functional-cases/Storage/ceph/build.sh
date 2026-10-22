@@ -189,15 +189,9 @@ func_install() {
         }
         require_test_commands || return $?
     else
-        if [[ -n "${CEPH_ROOTFS}" ]]; then
-            # Ubuntu 26.04 没有该版本的发行版 ceph 包:框架已把预构建镜像的根文件系统
-            # 导出到 CEPH_ROOTFS,软件本体就在里面,跳过所有安装层,只定位并校验版本。
-            log "build mode reuses the exported prebuilt image rootfs at ${CEPH_ROOTFS}"
-            resolve_ceph_binaries || {
-                log "ERROR: ceph is not present in the exported image rootfs"
-                return 40
-            }
-            require_test_commands || return $?
+        if ceph_layer_ready; then
+            # build 镜像里已装好目标版本(如 ubuntu 侧的预构建镜像),直接复用。
+            log "build mode reuses ceph ${SOFTWARE_VERSION} already installed in the image"
         else
             require_build_commands || return $?
             install_ceph_build || return $?

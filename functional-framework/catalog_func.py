@@ -193,21 +193,22 @@ def validate_case(
         not isinstance(image_name, str) or not image_name or "/" in image_name
     ):
         errors.append("image_name must be a non-empty repository name without '/'")
-    # 可选:build 模式下从该预构建镜像导出根文件系统,供无对应发行版二进制的 OS 复用。
-    bootstrap_image = case.get("bootstrap_image")
-    if bootstrap_image is not None:
-        if not isinstance(bootstrap_image, str) or not bootstrap_image:
-            errors.append("bootstrap_image must be a non-empty string")
+    # 可选:build 模式使用的镜像(镜像内已装好目标版本软件),用于发行版没有该版本
+    # 二进制、现场只能源码编译的场景,如 ubuntu 侧 ceph。
+    build_image = case.get("build_image")
+    if build_image is not None:
+        if not isinstance(build_image, str) or not build_image:
+            errors.append("build_image must be a non-empty string")
         else:
             try:
                 compose_image(
-                    bootstrap_image,
+                    build_image,
                     image_name if isinstance(image_name, str) and image_name else (name or "software"),
                     "0.0.0",
                     "aarch64",
                 )
             except (KeyError, IndexError, ValueError):
-                errors.append("bootstrap_image contains unsupported placeholders")
+                errors.append("build_image contains unsupported placeholders")
 
     try:
         relative = path.resolve().relative_to((root / CASES_DIRNAME).resolve())
