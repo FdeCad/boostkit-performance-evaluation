@@ -133,6 +133,7 @@ jobs:
       # 自托管 Runner 可能在受限网络中,代理地址由仓库 Secret 提供。
       # 优先级:按硬件的 PERF_PROXY_<HARDWARE> > 全局 PERF_PROXY > 不配代理。
       - name: Resolve proxy settings
+        id: proxy
         shell: bash
         env:
           PROXY_GLOBAL: ${{ secrets.PERF_PROXY }}
@@ -140,13 +141,22 @@ jobs:
           PROXY_KUNPENG950: ${{ secrets.PERF_PROXY_KUNPENG950 }}
           HARDWARE: ${{ matrix.hardware }}
         run: |
+          # 未单独配置的硬件沿用全局 PERF_PROXY;显式填 none/off/direct 表示该机器可直连,
+          # 完全不用代理(例如 920 有独立出口,不应被卷进 950 的代理)。
           raw="${PROXY_GLOBAL}"
           case "${HARDWARE}" in
             kunpeng920) [[ -z "${PROXY_KUNPENG920}" ]] || raw="${PROXY_KUNPENG920}" ;;
             kunpeng950) [[ -z "${PROXY_KUNPENG950}" ]] || raw="${PROXY_KUNPENG950}" ;;
           esac
+          raw="${raw//[[:space:]]/}"
+          case "${raw,,}" in
+            none | off | direct | disable | no)
+              echo "direct connection for ${HARDWARE}"
+              exit 0
+              ;;
+          esac
           # Secret 常带首尾空白/换行、引号或结尾斜杠,先归一化;未写 scheme 时默认 http。
-          proxy="${raw//[[:space:]]/}"
+          proxy="${raw}"
           proxy="${proxy%\"}"; proxy="${proxy#\"}"
           proxy="${proxy%\'}"; proxy="${proxy#\'}"
           proxy="${proxy%/}"
@@ -161,20 +171,19 @@ jobs:
             echo "cannot parse proxy for ${HARDWARE}; expected [http://][user:pass@]host[:port]" >&2
             exit 1
           fi
-          no_proxy="localhost,127.0.0.1,::1"
-          {
-            echo "PERF_PROXY=${proxy}"
-            echo "http_proxy=${proxy}"
-            echo "https_proxy=${proxy}"
-            echo "HTTP_PROXY=${proxy}"
-            echo "HTTPS_PROXY=${proxy}"
-            echo "no_proxy=${no_proxy}"
-            echo "NO_PROXY=${no_proxy}"
-          } >> "${GITHUB_ENV}"
+          # 只导出 PERF_PROXY:标准的 http_proxy/HTTPS_PROXY 一旦写进 GITHUB_ENV 会作用于
+          # 整个 job 的所有步骤,连 actions/upload-artifact 也会走代理,遇到自签证书直接失败。
+          # 需要走代理的步骤各自按需引用,框架也会自行派生并注入容器。
+          echo "PERF_PROXY=${proxy}" >> "${GITHUB_ENV}"
+          echo "value=${proxy}" >> "${GITHUB_OUTPUT}"
           # 代理地址属敏感信息,只回显是否配置,不输出地址本身。
           echo "proxy configured for ${HARDWARE}"
       - name: Install framework runtime dependency
         shell: bash
+        env:
+          http_proxy: ${{ steps.proxy.outputs.value }}
+          https_proxy: ${{ steps.proxy.outputs.value }}
+          no_proxy: localhost,127.0.0.1,::1
         run: |
           deps="${RUNNER_TEMP}/boostkit-func-deps"
           python3 -m pip install \
