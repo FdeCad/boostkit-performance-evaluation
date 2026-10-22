@@ -10,6 +10,24 @@ source "${SCRIPT_DIR}/common.sh"
 
 # ---------- 阶段:check ----------
 
+# client 失败/超时后的诊断证据:server 进程状态、/status 实际响应、server 日志尾部。
+# (brpc RPC 在对端"已监听但不响应"时默认无限等待,曾经把整个 check 挂死 18 分钟,
+# 这些证据用于区分 server 楔死 / client 单侧问题。)
+dump_echo_diagnostics() {
+    local server_pid="$1" rc="$2"
+    {
+        printf 'echo client failed (rc=%s; 124 = exceeded the 300s timeout)\n' "${rc}"
+        printf '\n=== server process state:\n'
+        ps -o pid,stat,etime,args -p "${server_pid}" 2>/dev/null ||
+            printf 'server process %s is gone\n' "${server_pid}"
+        printf '\n=== server /status response:\n'
+        curl --noproxy '*' -fsS --max-time 3 "http://127.0.0.1:${BRPC_ECHO_PORT}/status" 2>&1 ||
+            printf '(unreachable)\n'
+        printf '\n=== server log tail:\n'
+        tail -n 40 "${SERVICE_DIR}/echo_server.log" 2>/dev/null
+    } >>"${RESULTS_DIR}/upstream_echo.log" 2>&1 || true
+}
+
 # 运行上游 example/echo_c++ 的 server/client 做一次 RPC 回环。
 run_upstream_echo() {
     local server_pid=0 attempt rc=0
@@ -34,13 +52,24 @@ run_upstream_echo() {
         log "ERROR: echo server exited early; see ${SERVICE_DIR}/echo_server.log"
         return 40
     fi
-    "${BRPC_ECHO_CLIENT_BIN}" --server="127.0.0.1:${BRPC_ECHO_PORT}" \
+    # brpc RPC 无响应时默认无限等待(曾把 check 挂死 18 分钟),必须加硬超时兜底。
+    timeout 300 "${BRPC_ECHO_CLIENT_BIN}" --server="127.0.0.1:${BRPC_ECHO_PORT}" \
         >"${SERVICE_DIR}/echo_client.log" 2>&1 || rc=$?
+    [[ "${rc}" -ne 0 ]] && dump_echo_diagnostics "${server_pid}" "${rc}"
     kill -TERM "${server_pid}" 2>/dev/null || true
+    # 限时等待退出;吞信号不退时强杀,避免裸 wait 无限阻塞。
+    for attempt in {1..10}; do
+        kill -0 "${server_pid}" 2>/dev/null || break
+        sleep 1
+    done
+    if kill -0 "${server_pid}" 2>/dev/null; then
+        kill -KILL "${server_pid}" 2>/dev/null || true
+        sleep 1
+    fi
     wait "${server_pid}" 2>/dev/null || true
     rm -f "${SERVICE_DIR}/echo_server.pid"
     [[ "${rc}" -eq 0 ]] || {
-        log "ERROR: echo client failed; see ${SERVICE_DIR}/echo_client.log"
+        log "ERROR: echo client failed (rc=${rc}); see upstream_echo.log and echo_server.log"
         return 40
     }
     return 0
@@ -52,7 +81,7 @@ run_link_smoke() {
         log "ERROR: minimal smoke binary is unavailable"
         return 40
     }
-    "${BRPC_LINK_SMOKE_BIN}" >"${RESULTS_DIR}/link_smoke.log" 2>&1
+    timeout 120 "${BRPC_LINK_SMOKE_BIN}" >"${RESULTS_DIR}/link_smoke.log" 2>&1
 }
 
 write_functional_result() {

@@ -122,13 +122,41 @@ clone_bolt_source() {
     }
 }
 
-build_bolt() {
-    local -a make_args=(BUILD_VERSION="${SOFTWARE_VERSION}")
-    # 生成 Conan profile(依据可用编译器自动探测)。
-    (cd "${BOLT_SOURCE_DIR}" && python3 ./scripts/configure-conan-profile.py) || {
-        log "ERROR: failed to configure the Conan profile"
+# 生成 Conan 默认 profile 并按上游要求配置。
+# 对齐上游 scripts/setup-dev-env.sh 的 check_conan:默认 profile 不存在时
+# conan profile detect(自动探测编译器,同时生成 settings.yml)→ 确保
+# compiler.cppstd=gnu17(上游 CPP_STANDARD)→ 跑上游脚本补充 os.libc/os.libc_version
+# settings(scripts/configure-conan-libc-settings.py,需 PyYAML,随 conan 一并安装)。
+# 注意:此前误用不存在的 scripts/configure-conan-profile.py,实测报 file not found。
+configure_conan_profile() {
+    local conan_home profile cppstd="gnu17"
+    conan_home="${CONAN_HOME:-${HOME}/.conan2}"
+    profile="${conan_home}/profiles/default"
+    if [[ ! -f "${profile}" ]]; then
+        conan profile detect || {
+            log "ERROR: conan profile detect failed"
+            return 40
+        }
+    fi
+    [[ -f "${profile}" ]] || {
+        log "ERROR: conan default profile was not created at ${profile}"
         return 40
     }
+    if grep -q "^compiler.cppstd=" "${profile}"; then
+        sed -i "s/^compiler.cppstd=.*/compiler.cppstd=${cppstd}/" "${profile}"
+    else
+        printf 'compiler.cppstd=%s\n' "${cppstd}" >>"${profile}"
+    fi
+    log "conan profile ready: ${profile} (compiler.cppstd=${cppstd})"
+    (cd "${BOLT_SOURCE_DIR}" && python3 ./scripts/configure-conan-libc-settings.py) || {
+        log "ERROR: failed to configure conan libc settings"
+        return 40
+    }
+}
+
+build_bolt() {
+    local -a make_args=(BUILD_VERSION="${SOFTWARE_VERSION}")
+    configure_conan_profile || return $?
     # 上游官方目标 release_with_test = release 的全部选项 + skip_test=False +
     # enable_testutil=True,使测试二进制真实编译(上游 unittest_release 即此目标 + ctest)。
     # 普通 make release 不编译测试(BOLT_BUILD_TESTING 默认 OFF),ctest 会零测试空跑。
@@ -200,9 +228,20 @@ install_bolt_build() {
 # 触发 bolt 本体重编 + 测试二进制编译,每次运行重复付出,这是兜底方案的已知代价
 # (镜像方改用 release_with_test 构建即可免除)。
 ensure_prebuilt_test_tree() {
-    local tree
-    if tree="$(find_ctest_tree 2>/dev/null || true)" && [[ -n "${tree}" ]]; then
-        log "image test tree present: ${tree}; no bootstrap build needed"
+    local tree count
+    if tree="$(find_ctest_tree 2>/dev/null || true)" && [[ -n "${tree}" ]] \
+        && command -v ctest >/dev/null 2>&1; then
+        # 树存在不等于有测试:镜像用普通 make release 构建时 CTestTestfile.cmake
+        # 存在但注册 0 个测试,必须按过滤后的测试数判定是否需要补建。
+        count="$(ctest --test-dir "${tree}" -N -R "${BOLT_UPSTREAM_TEST_FILTER}" 2>/dev/null |
+            sed -n 's/^Total Tests: //p' | tail -n 1 || true)"
+        if [[ -n "${count}" && "${count}" != "0" ]]; then
+            log "image test tree present: ${tree} (${count} tests for '${BOLT_UPSTREAM_TEST_FILTER}'); no bootstrap build needed"
+            return 0
+        fi
+        log "image test tree at ${tree} registers no tests for '${BOLT_UPSTREAM_TEST_FILTER}' (image was built with plain 'make release'); bootstrapping"
+    elif [[ -n "$(find_ctest_tree 2>/dev/null || true)" ]]; then
+        log "image test tree present but ctest is unavailable; cannot verify test count"
         return 0
     fi
     local -a missing=()

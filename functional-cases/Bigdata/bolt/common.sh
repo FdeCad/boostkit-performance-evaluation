@@ -253,6 +253,7 @@ install_os_packages() {
     for logical in "$@"; do
         case "${logical}" in
             git) rhel+=(git); debian+=(git) ;;
+            ninja) rhel+=(ninja-build); debian+=(ninja-build) ;;
             python3) rhel+=(python3 python3-pip); debian+=(python3 python3-pip) ;;
             # Bolt 需要 GCC 10+ / Clang 16+(C++17),CMake 与 make。
             build-tools) rhel+=(gcc gcc-c++ make cmake); debian+=(gcc g++ make cmake) ;;
@@ -284,10 +285,12 @@ require_build_commands() {
     local -a logical=()
     command -v git >/dev/null 2>&1 || logical+=(git)
     command -v python3 >/dev/null 2>&1 || logical+=(python3)
+    # ninja 是上游 check_basic_tools 明确要求的基础工具(CMake 生成器可用)。
     if ! command -v cmake >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1 || \
         ! command -v cc >/dev/null 2>&1 || ! command -v c++ >/dev/null 2>&1; then
         logical+=(build-tools)
     fi
+    command -v ninja >/dev/null 2>&1 || logical+=(ninja)
     (( ${#logical[@]} == 0 )) && return 0
     log "installing missing dependencies: ${logical[*]}"
     install_os_packages "${logical[@]}" || return 30
