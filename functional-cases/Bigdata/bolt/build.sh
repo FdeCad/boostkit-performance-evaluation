@@ -155,9 +155,37 @@ configure_conan_profile() {
     }
 }
 
+# 配置依赖配方远端(对齐上游 scripts/install-bolt-deps.sh,build 模式必做)。
+# bolt 的依赖配方不在 conancenter:folly/2022.10.31.00、llvm-core/*-bolt、
+# paimon-cpp/*-bolt、sonic-cpp/*-bolt 等自定义版本仅存在于 bytedance 的
+# conan-center-index fork。上游做法是把该 fork 浅克隆到 conan home,注册为
+# local-recipes-index 类型的本地远端(index 0,优先于 conancenter);
+# 二进制仍由 --build=missing 从源码编译。
+# 与上游的差异:不执行其内置的 pip install conan==2.32.0——ubuntu 26.04 的
+# PEP668 管控环境下裸 pip 会失败,conan 由 ensure_conan 以 --user/--break-system-packages
+# 方式安装(版本 >= 2.0.14 即支持 local-recipes-index)。
+prepare_bolt_dependencies() {
+    local cci_home cci_ref="${BOLT_CCI_REF:-main}"
+    cci_home="${CONAN_HOME:-${HOME}/.conan2}/conan-center-index"
+    log "cloning bytedance conan-center-index (ref ${cci_ref}) to register the local recipe remote"
+    rm -rf -- "${cci_home}"
+    GIT_TERMINAL_PROMPT=0 git clone --quiet --depth 1 --branch "${cci_ref}" \
+        "${BOLT_CCI_URL:-https://github.com/bytedance/conan-center-index.git}" "${cci_home}" || {
+        log "ERROR: failed to clone bytedance/conan-center-index (ref ${cci_ref})"
+        return 30
+    }
+    conan remote remove bolt-cci-local >/dev/null 2>&1 || true
+    conan remote add --index 0 --type local-recipes-index bolt-cci-local "${cci_home}" || {
+        log "ERROR: failed to register the local recipe remote bolt-cci-local"
+        return 30
+    }
+    log "conan remote bolt-cci-local ready (local-recipes-index: ${cci_home})"
+}
+
 build_bolt() {
     local -a make_args=(BUILD_VERSION="${SOFTWARE_VERSION}")
     configure_conan_profile || return $?
+    prepare_bolt_dependencies || return $?
     # 上游官方镜像同款目标 make release(BOLT_BUILD_TESTING 默认 OFF,不编译测试)。
     # 测试职责统一收敛到 engine-smoke(两个模式共用同一用例,见 prepare_engine_smoke):
     # gtest 单测需要额外从源码编译 gtest/duckdb/cpr 等重依赖,openEuler 镜像的
