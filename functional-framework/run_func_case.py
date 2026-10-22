@@ -39,8 +39,16 @@ FORWARD_ENV_KEYS = (
     "PERF_ACTUAL_VERSION_FILE",
     "TMPDIR",
     "PERF_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
     "PYTHONUNBUFFERED",
 )
+# 代理未单独声明 no_proxy 时的默认排除项:容器内的回环访问不能被代理接管。
+DEFAULT_NO_PROXY = "localhost,127.0.0.1,::1"
 SHELL_FUNCTION_RUNNER = r"""
 script_path="$1"
 function_name="$2"
@@ -171,8 +179,17 @@ def build_context(args: argparse.Namespace, case: dict[str, Any], config: dict[s
     )
 
 
+def resolve_proxy() -> str:
+    """取当前生效的代理地址,优先 PERF_PROXY,其次标准代理变量。"""
+    for key in ("PERF_PROXY", "https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return ""
+
+
 def stage_environment(context: CellContext) -> dict[str, str]:
-    return {
+    environment = {
         "SOFTWARE_VERSION": context.version,
         "EXPECTED_ARCH": context.architecture,
         "FUNC_OS": context.operating_system,
@@ -185,6 +202,27 @@ def stage_environment(context: CellContext) -> dict[str, str]:
         "TMPDIR": str(context.work_dir / "tmp"),
         "PYTHONUNBUFFERED": "1",
     }
+    # 容器内 apt/dnf/curl/git/pip 都按标准代理变量取代理;这里统一派生并转发,
+    # 用例脚本无需再逐个拼 --setopt=proxy / -o Acquire::http::Proxy。
+    proxy = resolve_proxy()
+    if proxy:
+        no_proxy = (
+            os.environ.get("NO_PROXY", "").strip()
+            or os.environ.get("no_proxy", "").strip()
+            or DEFAULT_NO_PROXY
+        )
+        environment.update(
+            {
+                "PERF_PROXY": proxy,
+                "http_proxy": proxy,
+                "https_proxy": proxy,
+                "HTTP_PROXY": proxy,
+                "HTTPS_PROXY": proxy,
+                "no_proxy": no_proxy,
+                "NO_PROXY": no_proxy,
+            }
+        )
+    return environment
 
 
 def _inner_shell(script: Path, function: str) -> list[str]:
