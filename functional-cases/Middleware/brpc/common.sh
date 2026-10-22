@@ -193,7 +193,7 @@ install_os_packages() {
             gzip) rhel+=(gzip); debian+=(gzip) ;;
             cmake) rhel+=(cmake); debian+=(cmake) ;;
             build-tools) rhel+=(gcc gcc-c++ make); debian+=(build-essential) ;;
-            protobuf) rhel+=(protobuf-devel protobuf-compiler); debian+=(libprotobuf-dev protobuf-compiler) ;;
+            protobuf) rhel+=(protobuf-devel protobuf-compiler); debian+=(libprotobuf-dev libprotoc-dev protobuf-compiler) ;;
             gflags) rhel+=(gflags-devel); debian+=(libgflags-dev) ;;
             leveldb) rhel+=(leveldb-devel); debian+=(libleveldb-dev) ;;
             snappy) rhel+=(snappy-devel); debian+=(libsnappy-dev) ;;
@@ -324,6 +324,28 @@ resolve_brpc_source_tree() {
         fi
     done
     return 1
+}
+
+# 收集系统内 protobuf(abseil) 的共享库绝对路径,供链接示例时显式带上。
+# protobuf >= 22 链接 abseil;镜像里 libbrpc/libprotobuf 的 absl 依赖必须出现在链接行,
+# 否则 GNU ld 以 "DSO missing from command line" 报错。缺失的具体组件无法枚举,
+# 全量发现最稳;系统没有 absl(如 protobuf 3.21)时输出为空,行为不变。
+# 纯输出,供命令替换/映射调用。
+absl_dso_paths() {
+    local dir lib real
+    local -a dirs=("${BRPC_LIB_DIR:-}" /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib)
+    local -A seen=()
+    for dir in "${dirs[@]}"; do
+        [[ -n "${dir}" && -d "${dir}" ]] || continue
+        for lib in "${dir}"/libabsl_*.so*; do
+            [[ -e "${lib}" ]] || continue
+            real="$(readlink -f "${lib}" 2>/dev/null)" || real="${lib}"
+            [[ -n "${real}" && -z "${seen[${real}]:-}" ]] || continue
+            seen["${real}"]=1
+            printf '%s\n' "${real}"
+        done
+    done
+    return 0
 }
 
 json_escape() {

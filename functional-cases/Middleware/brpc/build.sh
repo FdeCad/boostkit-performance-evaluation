@@ -9,8 +9,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=common.sh
 source "${SCRIPT_DIR}/common.sh"
 
-# 链接 libbrpc 静态库所需的基础依赖库。
-BRPC_LINK_LIBS=(-lbrpc -lprotobuf -lgflags -lssl -lcrypto -lleveldb -lsnappy -lz -lpthread -ldl -lrt)
+# 链接 libbrpc 所需的基础依赖库;abseil 依赖由 build_link_libs 动态追加。
+BRPC_BASE_LINK_LIBS=(-lbrpc -lprotobuf -lgflags -lssl -lcrypto -lleveldb -lsnappy -lz -lpthread -ldl -lrt)
+BRPC_LINK_LIBS=()
+
+# 组装最终链接行:基础依赖 + absl 共享库绝对路径(存在才追加,protobuf>=22 需要;
+# 传 .so 绝对路径可解掉静态 libbrpc 成员对 absl 符号的未定义引用)。
+build_link_libs() {
+    BRPC_LINK_LIBS=("${BRPC_BASE_LINK_LIBS[@]}")
+    local f
+    while IFS= read -r f; do
+        [[ -n "${f}" ]] && BRPC_LINK_LIBS+=("${f}")
+    done < <(absl_dso_paths)
+    log "link line: ${BRPC_LINK_LIBS[*]}"
+}
 
 # ---------- 阶段:prepare ----------
 
@@ -201,9 +213,9 @@ func_install() {
         }
     fi
 
+    build_link_libs
     compile_echo_example "${BRPC_SOURCE_TREE}" || return $?
     compile_link_smoke || return $?
-
     actual="$(detect_brpc_version || true)"
     [[ "${actual}" == "${SOFTWARE_VERSION}" ]] || {
         log "ERROR: brpc ${actual:-unknown}, expected ${SOFTWARE_VERSION}"
