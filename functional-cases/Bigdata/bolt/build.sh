@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Bolt 构建脚本:环境采集 + 准备被测软件(自源码用 Conan+CMake 构建,或校验镜像内已有构建)。
+# Bolt 构建脚本:环境采集 + 准备被测软件(自源码用 Conan+CMake 构建,或校验镜像内已有构建)
+#   + 准备 engine-smoke 用例(注入最小消费者,链接树内引擎目标并编译,供 check 阶段真实运行)。
 #   FUNC_MODE=prebuilt - 校验镜像内已有 Bolt 构建(无官方预编译产物,优先复用镜像)
 #   FUNC_MODE=build    - 分层获取:1) 上游官方二进制 2) 三方仓库包 3) 源码编译(Conan+CMake,很重)
 #                        Bolt 官方仅有源码,层1/层2 无可用渠道,只能走层3。
@@ -157,11 +158,12 @@ configure_conan_profile() {
 build_bolt() {
     local -a make_args=(BUILD_VERSION="${SOFTWARE_VERSION}")
     configure_conan_profile || return $?
-    # 上游官方目标 release_with_test = release 的全部选项 + skip_test=False +
-    # enable_testutil=True,使测试二进制真实编译(上游 unittest_release 即此目标 + ctest)。
-    # 普通 make release 不编译测试(BOLT_BUILD_TESTING 默认 OFF),ctest 会零测试空跑。
+    # 上游官方镜像同款目标 make release(BOLT_BUILD_TESTING 默认 OFF,不编译测试)。
+    # 测试职责统一收敛到 engine-smoke(两个模式共用同一用例,见 prepare_engine_smoke):
+    # gtest 单测需要额外从源码编译 gtest/duckdb/cpr 等重依赖,openEuler 镜像的
+    # conan 缓存不含这些包,现场补建代价 1-2 小时以上,故整个矩阵不再跑单测。
     # 首次构建会用 Conan 从源码编译依赖,耗时较长(见 timeout_minutes)。
-    (cd "${BOLT_SOURCE_DIR}" && make release_with_test "${make_args[@]}") || {
+    (cd "${BOLT_SOURCE_DIR}" && make release "${make_args[@]}") || {
         log "ERROR: Bolt build failed"
         return 40
     }
@@ -222,43 +224,158 @@ install_bolt_build() {
     return 40
 }
 
-# prebuilt:镜像未随带测试树时,在其自带源码树上补建上游测试
-# (上游官方 release_with_test 目标 = release 全部选项 + skip_test=False + enable_testutil=True)。
-# 被测代码与工具链均来自镜像,依赖命中镜像内 conan 缓存;但 conan options 变化会
-# 触发 bolt 本体重编 + 测试二进制编译,每次运行重复付出,这是兜底方案的已知代价
-# (镜像方改用 release_with_test 构建即可免除)。
-ensure_prebuilt_test_tree() {
-    local tree count
-    if tree="$(find_ctest_tree 2>/dev/null || true)" && [[ -n "${tree}" ]] \
-        && command -v ctest >/dev/null 2>&1; then
-        # 树存在不等于有测试:镜像用普通 make release 构建时 CTestTestfile.cmake
-        # 存在但注册 0 个测试,必须按过滤后的测试数判定是否需要补建。
-        count="$(ctest --test-dir "${tree}" -N -R "${BOLT_UPSTREAM_TEST_FILTER}" 2>/dev/null |
-            sed -n 's/^Total Tests: //p' | tail -n 1 || true)"
-        if [[ -n "${count}" && "${count}" != "0" ]]; then
-            log "image test tree present: ${tree} (${count} tests for '${BOLT_UPSTREAM_TEST_FILTER}'); no bootstrap build needed"
-            return 0
-        fi
-        log "image test tree at ${tree} registers no tests for '${BOLT_UPSTREAM_TEST_FILTER}' (image was built with plain 'make release'); bootstrapping"
-    elif [[ -n "$(find_ctest_tree 2>/dev/null || true)" ]]; then
-        log "image test tree present but ctest is unavailable; cannot verify test count"
+# ---------- engine-smoke:两个模式共用的核心用例 ----------
+# 用例语义(ubuntu build 与 openEuler prebuilt 完全一致):
+#   在被测构建树上注入一个最小 CMake 消费者,链接树内 bolt 引擎目标,
+#   编译并真实运行,证明交付的引擎库可被外部代码链接、可执行。
+#   prebuilt 用镜像内构建树(/workspace/bolt/_build/Release),build 用本地构建树。
+# 关键实现约束:
+#   * 直接用 cmake 复用已配置的构建树(CMakeCache 保留 → 引擎对象零重编,
+#     只编 1 个 smoke 编译单元 + 1 次链接,分钟级)。绝不能走上游 make——其
+#     _conan_prepare 在 conan.options 与镜像构建时不一致时会删 CMakeCache.txt
+#     触发全量重编(实测这是补建方案耗时 1-2 小时以上的根因)。
+#   * smoke 源码目录放在被测源码树之外,结束后用 git 还原根 CMakeLists.txt,
+#     被测源码树保持干净。
+#   * 各阶段硬超时(重配置 10 min / 构建 20 min),最坏 ~30 分钟必出结果。
+
+BOLT_SMOKE_TARGET="bolt_func_smoke"
+
+# 定位已配置的 CMake 构建树(以 CMakeCache.txt 为准)。
+# 本函数经命令替换调用,不得向 stdout 输出日志。
+find_cmake_tree() {
+    if [[ -n "${BOLT_BUILD_DIR:-}" && -f "${BOLT_BUILD_DIR}/CMakeCache.txt" ]]; then
+        printf '%s\n' "${BOLT_BUILD_DIR}"
         return 0
     fi
-    local -a missing=()
-    command -v make >/dev/null 2>&1 || missing+=(make)
-    command -v conan >/dev/null 2>&1 || missing+=(conan)
-    command -v git >/dev/null 2>&1 || missing+=(git)
-    command -v c++ >/dev/null 2>&1 || missing+=(c++)
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        log "WARNING: image has no test tree and lacks toolchain (${missing[*]}); upstream-unit-test will be reported as skipped"
+    [[ -n "${BOLT_HOME:-}" && -d "${BOLT_HOME}" ]] || return 1
+    local found
+    found="$(find "${BOLT_HOME}" -maxdepth 4 -type f -name CMakeCache.txt 2>/dev/null | head -n 1 || true)"
+    [[ -n "${found}" ]] || return 1
+    printf '%s\n' "$(dirname "${found}")"
+}
+
+# 定位引擎库归档(符号锚点来源,也是 link-smoke 的检查对象)。
+find_engine_lib_for_smoke() {
+    local tree="$1" lib
+    lib="$(find "${tree}" -maxdepth 3 -type f \( -name 'libbolt_engine.a' -o -name 'libbolt_engine.so*' \) 2>/dev/null | head -n 1 || true)"
+    [[ -n "${lib}" ]] || return 1
+    printf '%s\n' "${lib}"
+}
+
+# 从引擎库归档挑选一个 bolt 命名空间下已定义的 T 符号,作为 smoke 程序的
+# 链接锚点:smoke 仅取其地址、不调用,迫使链接器从归档拉入真实引擎成员,
+# 防止空 main 被整档裁剪(不引用任何符号时静态库成员不会被链接进来)。
+pick_smoke_symbol() {
+    local lib="$1" sym
+    sym="$(nm --defined-only "${lib}" 2>/dev/null |
+        awk '$2 == "T" && $3 ~ /^_ZN4bolt/ {print $3; exit}' || true)"
+    if [[ -z "${sym}" ]]; then
+        sym="$(nm --defined-only "${lib}" 2>/dev/null |
+            awk '$2 == "T" && $3 ~ /^_Z/ {print $3; exit}' || true)"
+    fi
+    [[ -n "${sym}" ]] || return 1
+    printf '%s\n' "${sym}"
+}
+
+# 还原被测源码树的根 CMakeLists.txt(优先 git checkout,退回备份拷贝)。
+restore_smoke_cmakelists() {
+    local src="$1" backup="$2"
+    if [[ -d "${src}/.git" ]] && git -C "${src}" checkout -- CMakeLists.txt 2>/dev/null; then
         return 0
     fi
-    log "image ships no test tree; building upstream tests from the image's own source tree at ${BOLT_HOME} (upstream release_with_test target; deps hit the image's conan cache)"
-    (cd "${BOLT_HOME}" && make release_with_test BUILD_VERSION="${SOFTWARE_VERSION}") || {
-        log "ERROR: in-image bootstrap build of the upstream test tree failed"
+    cp "${backup}" "${src}/CMakeLists.txt"
+}
+
+prepare_engine_smoke() {
+    local src tree lib sym smoke_dir bin
+    src="${BOLT_SOURCE_DIR:-${BOLT_HOME:-}}"
+    [[ -n "${src}" && -f "${src}/CMakeLists.txt" ]] || {
+        log "ERROR: engine smoke requires a bolt source tree with CMakeLists.txt (looked at: ${src:-<unset>})"
         return 40
     }
-    log "in-image test tree build finished"
+    tree="$(find_cmake_tree || true)"
+    [[ -n "${tree}" ]] || {
+        log "ERROR: no configured CMake build tree (CMakeCache.txt) found for the engine smoke"
+        return 40
+    }
+    command -v cmake >/dev/null 2>&1 || {
+        log "ERROR: cmake is unavailable; cannot prepare the engine smoke"
+        return 40
+    }
+    command -v nm >/dev/null 2>&1 || {
+        log "ERROR: nm(binutils) is unavailable; cannot pick the smoke symbol anchor"
+        return 40
+    }
+    lib="$(find_engine_lib_for_smoke "${tree}" || true)"
+    [[ -n "${lib}" ]] || {
+        log "ERROR: no libbolt_engine archive found under ${tree}"
+        return 40
+    }
+    sym="$(pick_smoke_symbol "${lib}" || true)"
+    [[ -n "${sym}" ]] || {
+        log "ERROR: no defined symbol found in ${lib} for the smoke link anchor"
+        return 40
+    }
+    log "engine smoke: anchor symbol ${sym} from ${lib}"
+
+    smoke_dir="${PERF_WORK_DIR}/engine-smoke"
+    rm -rf -- "${smoke_dir}"
+    mkdir -p "${smoke_dir}"
+    cat >"${smoke_dir}/main.cpp" <<EOF
+// Auto-generated minimal consumer for the Bolt engine functional smoke.
+// Links the in-tree bolt engine target and takes the address of one
+// archive-defined symbol (${sym}) so the linker must resolve real
+// engine code; never called, so no ABI assumptions are needed.
+extern "C" void bolt_func_smoke_symbol() __asm__("${sym}");
+
+int main() {
+    volatile void *probe = reinterpret_cast<void *>(&bolt_func_smoke_symbol);
+    return probe == nullptr ? 1 : 0;
+}
+EOF
+    # 树内引擎目标的链接图(全部 conan 依赖)由 CMake 自行解析,不手工拼链接行。
+    cat >"${smoke_dir}/CMakeLists.txt" <<'EOF'
+cmake_minimum_required(VERSION 3.20)
+set(BOLT_SMOKE_LIB "")
+foreach(candidate bolt_engine bolt bolt::bolt_engine bolt::bolt)
+    if(TARGET ${candidate})
+        set(BOLT_SMOKE_LIB ${candidate})
+        break()
+    endif()
+endforeach()
+if("${BOLT_SMOKE_LIB}" STREQUAL "")
+    message(FATAL_ERROR "engine smoke: no bolt engine CMake target found (tried bolt_engine, bolt, bolt::bolt_engine, bolt::bolt)")
+endif()
+add_executable(bolt_func_smoke main.cpp)
+target_link_libraries(bolt_func_smoke PRIVATE ${BOLT_SMOKE_LIB})
+EOF
+    cp "${src}/CMakeLists.txt" "${smoke_dir}/CMakeLists.txt.orig"
+    printf '\nadd_subdirectory("%s" bolt_func_smoke_dir)\n' "${smoke_dir}" >>"${src}/CMakeLists.txt"
+
+    log "engine smoke: reusing configured build tree at ${tree} (engine objects are not rebuilt)"
+    if ! timeout 600 cmake -S "${src}" -B "${tree}" >>"${RESULTS_DIR}/smoke_build.log" 2>&1; then
+        log "ERROR: engine smoke reconfigure failed or exceeded 10 min; see smoke_build.log"
+        restore_smoke_cmakelists "${src}" "${smoke_dir}/CMakeLists.txt.orig"
+        return 40
+    fi
+    if ! timeout 1200 cmake --build "${tree}" --target "${BOLT_SMOKE_TARGET}" >>"${RESULTS_DIR}/smoke_build.log" 2>&1; then
+        log "ERROR: engine smoke build failed or exceeded 20 min; see smoke_build.log"
+        restore_smoke_cmakelists "${src}" "${smoke_dir}/CMakeLists.txt.orig"
+        return 40
+    fi
+    restore_smoke_cmakelists "${src}" "${smoke_dir}/CMakeLists.txt.orig"
+
+    bin="${tree}/bolt_func_smoke_dir/${BOLT_SMOKE_TARGET}"
+    if [[ ! -x "${bin}" ]]; then
+        bin="$(find "${tree}/bolt_func_smoke_dir" -maxdepth 1 -type f -name "${BOLT_SMOKE_TARGET}" 2>/dev/null | head -n 1 || true)"
+    fi
+    if [[ -z "${bin}" || ! -x "${bin}" ]]; then
+        log "ERROR: engine smoke binary was not produced under ${tree}/bolt_func_smoke_dir"
+        return 40
+    fi
+    mkdir -p "${RESULTS_DIR}"
+    printf '%s\n' "${bin}" >"${RESULTS_DIR}/smoke_binary.path"
+    log "engine smoke binary ready: ${bin}"
 }
 
 func_install() {
@@ -301,9 +418,8 @@ func_install() {
         log "ERROR: Bolt ${actual:-unknown}, expected ${SOFTWARE_VERSION}"
         return 40
     }
-    if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
-        ensure_prebuilt_test_tree || return $?
-    fi
+    # 两个模式统一准备 engine-smoke 用例(prebuilt 用镜像构建树,build 用本地构建树)。
+    prepare_engine_smoke || return $?
     mkdir -p "$(dirname "${PERF_ACTUAL_VERSION_FILE}")"
     printf '%s\n' "${actual}" >"${PERF_ACTUAL_VERSION_FILE}" || return 40
     log "Bolt ${actual} ready (mode=${FUNC_MODE})"
