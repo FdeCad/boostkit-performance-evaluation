@@ -77,8 +77,9 @@ check_architecture() {
 
 # 定位镜像内已构建/已安装的 Bolt 根目录(prebuilt 模式)。
 # Bolt 无官方预编译产物,若镜像未内置则返回非零,由 install 阶段报错。
+# 本函数经命令替换调用,不得向 stdout 输出日志。
 resolve_bolt_root() {
-    local candidate
+    local candidate found
     local -a candidates=(
         "${BOLT_HOME_OVERRIDE:-}"
         "/opt/bolt"
@@ -92,6 +93,18 @@ resolve_bolt_root() {
             return 0
         fi
     done
+    # 镜像布局无法事先约定:按上游构建体系的版本标记文件搜索兜底
+    # (BUILD_VERSION 是上游 Makefile 的构建参数文件,预构建镜像应随构建产物保留)。
+    # -xdev 跳过 /proc /sys 等伪文件系统;独立挂载点(如 /home /data)补搜一轮。
+    found="$(find / -xdev -maxdepth 5 -type f -name BUILD_VERSION 2>/dev/null | head -n 1 || true)"
+    if [[ -z "${found}" ]]; then
+        found="$(find /home /root /srv /data /workspace /mnt /media -maxdepth 5 \
+            -type f -name BUILD_VERSION 2>/dev/null | head -n 1 || true)"
+    fi
+    if [[ -n "${found}" ]]; then
+        printf '%s\n' "$(dirname "${found}")"
+        return 0
+    fi
     return 1
 }
 
@@ -161,7 +174,9 @@ configure_runtime_paths() {
         BOLT_HOME="$(resolve_bolt_root || true)"
     else
         BOLT_SOURCE_DIR="${PERF_WORK_DIR}/bolt"
-        BOLT_BUILD_DIR="${BOLT_SOURCE_DIR}/build/${BOLT_BUILD_TYPE}"
+        # 上游 Makefile 的构建树在 ${SOURCE}/_build/${BUILD_TYPE}(BUILD_BASE_DIR=_build),
+        # release_with_test 固定 BUILD_TYPE=Release;此前误写 build/ 导致 ctest 找错目录。
+        BOLT_BUILD_DIR="${BOLT_SOURCE_DIR}/_build/${BOLT_BUILD_TYPE^}"
     fi
 
     export SOFTWARE_NAME CATEGORY SOFTWARE_VERSION EXPECTED_ARCH FUNC_OS FUNC_HARDWARE FUNC_MODE

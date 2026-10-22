@@ -61,6 +61,8 @@ ensure_conan() {
 
 # 通过 GitHub API 把短 sha 解析为完整 40 位 sha(git fetch 服务端只接受完整对象名;
 # 实测短 sha 直接 fetch 报 "couldn't find remote ref")。输入已是完整 sha 时原样返回。
+# 注意:本函数经命令替换调用,内部日志必须写 stderr,否则会污染捕获结果
+# (实测曾把日志行连同 sha 一起传给 git fetch,报 invalid refspec)。
 resolve_full_commit() {
     local query="${1}" repo=""
     if [[ "${query}" =~ ^[0-9a-fA-F]{40}$ ]]; then
@@ -70,10 +72,10 @@ resolve_full_commit() {
     if [[ "${BOLT_SOURCE_URL}" =~ github\.com[:/]+([A-Za-z0-9._-]+/[A-Za-z0-9._-]+) ]]; then
         repo="${BASH_REMATCH[1]%.git}"
     else
-        log "ERROR: cannot resolve a commit ref without a github.com source URL: ${BOLT_SOURCE_URL}"
+        log "ERROR: cannot resolve a commit ref without a github.com source URL: ${BOLT_SOURCE_URL}" >&2
         return 1
     fi
-    log "resolving commit ${query} via GitHub API (repo: ${repo})"
+    log "resolving commit ${query} via GitHub API (repo: ${repo})" >&2
     https_proxy="${PERF_PROXY:-${https_proxy:-}}" python3 - "${repo}" "${query}" <<'PY'
 import json, sys, urllib.request
 
@@ -127,8 +129,11 @@ build_bolt() {
         log "ERROR: failed to configure the Conan profile"
         return 40
     }
+    # 上游官方目标 release_with_test = release 的全部选项 + skip_test=False +
+    # enable_testutil=True,使测试二进制真实编译(上游 unittest_release 即此目标 + ctest)。
+    # 普通 make release 不编译测试(BOLT_BUILD_TESTING 默认 OFF),ctest 会零测试空跑。
     # 首次构建会用 Conan 从源码编译依赖,耗时较长(见 timeout_minutes)。
-    (cd "${BOLT_SOURCE_DIR}" && make "${BOLT_BUILD_TYPE}" "${make_args[@]}") || {
+    (cd "${BOLT_SOURCE_DIR}" && make release_with_test "${make_args[@]}") || {
         log "ERROR: Bolt build failed"
         return 40
     }
@@ -198,7 +203,7 @@ func_install() {
         # 镜像已装好:定位构建产物并用版本标记文件校验,不做任何构建。
         BOLT_HOME="$(resolve_bolt_root || true)"
         [[ -n "${BOLT_HOME}" && -d "${BOLT_HOME}" ]] || {
-            log "ERROR: prebuilt Bolt is not present in the software image"
+            log "ERROR: prebuilt Bolt is not present in the software image (checked /opt/bolt, /usr/local/bolt, /usr/lib/bolt, ~/bolt and BUILD_VERSION markers under common prefixes; image must ship the built Bolt tree)"
             return 40
         }
         require_test_commands || return $?

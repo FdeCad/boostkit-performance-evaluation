@@ -33,10 +33,11 @@ execution:
     cleanup:
       script: test.sh
       function: func_cleanup
-  # Bolt 首次构建会用 Conan 从源码编译全部依赖(LLVM/Arrow 等),非常重。
-  timeout_minutes: 300
-  # Conan + CMake 完整构建 C++ 引擎,依赖与中间产物很大。
-  min_free_disk_gb: 16
+  # Bolt 首次构建会用 Conan 从源码编译全部依赖(LLVM/Arrow 等)并编译测试二进制
+  # (上游 release_with_test 目标),非常重。
+  timeout_minutes: 360
+  # Conan + CMake 完整构建 C++ 引擎,依赖、中间产物与测试二进制都很大。
+  min_free_disk_gb: 24
 
 # 功能判定项,名称与 functional_result.json 中 checks[].name 一一对应。
 # 判定来源:优先复用上游自带 gtest 单测子集;不可行时退化为构建产物链接冒烟。
@@ -44,7 +45,7 @@ checks:
   - name: version
     description: 校验源码 commit / 镜像内 BUILD_VERSION 等于请求版本(短 sha 与完整 sha 互为前缀即可匹配)
   - name: upstream-unit-test
-    description: 运行上游自带 gtest 单测子集(ctest -R 过滤)
+    description: 运行上游自带 gtest 单测子集(ctest -R 过滤);build 模式经上游 release_with_test 目标编译测试后真实执行(0 测试视为构建异常),prebuilt 镜像无测试树时记 skipped
     upstream_command: ctest -R bolt_ --output-on-failure
   - name: link-smoke
     description: 最小可用性冒烟,校验构建产物 libbolt*.so 可被动态链接器加载

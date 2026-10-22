@@ -25,6 +25,20 @@ find_bolt_lib() {
     return 1
 }
 
+# 定位含 CTestTestfile.cmake 的构建树(build 模式用 BOLT_BUILD_DIR;
+# prebuilt 镜像若随带测试树则在 BOLT_HOME 下自动发现)。纯输出,供命令替换调用。
+find_ctest_tree() {
+    local marker
+    if [[ -n "${BOLT_BUILD_DIR:-}" && -f "${BOLT_BUILD_DIR}/CTestTestfile.cmake" ]]; then
+        printf '%s\n' "${BOLT_BUILD_DIR}"
+        return 0
+    fi
+    [[ -n "${BOLT_HOME:-}" && -d "${BOLT_HOME}" ]] || return 1
+    marker="$(find "${BOLT_HOME}" -maxdepth 4 -type f -name CTestTestfile.cmake 2>/dev/null | head -n 1 || true)"
+    [[ -n "${marker}" ]] || return 1
+    printf '%s\n' "$(dirname "${marker}")"
+}
+
 write_functional_result() {
     local overall="$1" v_status="$2" v_detail="$3" u_status="$4" u_detail="$5" c_status="$6" c_detail="$7"
     FUNC_OVERALL="${overall}" \
@@ -98,32 +112,52 @@ func_check() {
     fi
 
     # 2) 上游自带 gtest 单测子集(经 ctest 过滤运行)。
-    #    依赖 install 阶段在同一构建树内编译出的测试目标;prebuilt 镜像通常无测试树。
-    if [[ -n "${BOLT_BUILD_DIR:-}" && -d "${BOLT_BUILD_DIR}" ]] && command -v ctest >/dev/null 2>&1; then
-        if (cd "${BOLT_BUILD_DIR}" && ctest -R "${BOLT_UPSTREAM_TEST_FILTER}" --output-on-failure) \
+    #    build 模式:install 阶段用上游 release_with_test 目标编译了测试,必须真实存在,
+    #    0 测试视为构建异常(failed);prebuilt 模式:镜像未随带测试树记 skipped
+    #    (镜像不含测试树不是被测软件的功能缺陷)。
+    local ctest_tree test_count
+    ctest_tree="$(find_ctest_tree || true)"
+    if [[ -n "${ctest_tree}" ]] && command -v ctest >/dev/null 2>&1; then
+        test_count="$(ctest --test-dir "${ctest_tree}" -N -R "${BOLT_UPSTREAM_TEST_FILTER}" 2>/dev/null |
+            sed -n 's/^Total Tests: //p' | tail -n 1 || true)"
+        if [[ -z "${test_count}" || "${test_count}" == "0" ]]; then
+            # 严禁零测试空跑通过(ctest 对 0 测试返回 0,不设此防会假性 passed)。
+            if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
+                unit_status="skipped"
+                unit_detail="skipped: prebuilt image ships no ctest tests for filter '${BOLT_UPSTREAM_TEST_FILTER}' (upstream 'make release' does not compile tests)"
+            else
+                unit_detail="no tests registered for filter '${BOLT_UPSTREAM_TEST_FILTER}' in ${ctest_tree}; expected them from the release_with_test build; see bolt_test.log"
+            fi
+        elif (cd "${ctest_tree}" && ctest -R "${BOLT_UPSTREAM_TEST_FILTER}" --output-on-failure -j "$(nproc 2>/dev/null || printf '1')") \
             >>"${RESULTS_DIR}/bolt_test.log" 2>&1; then
             unit_status="passed"
-            unit_detail="ctest subset '${BOLT_UPSTREAM_TEST_FILTER}' passed"
+            unit_detail="ctest subset '${BOLT_UPSTREAM_TEST_FILTER}' passed (${test_count} tests) in ${ctest_tree}"
         else
-            unit_detail="ctest subset '${BOLT_UPSTREAM_TEST_FILTER}' failed or no tests were built; see bolt_test.log"
+            unit_detail="ctest subset '${BOLT_UPSTREAM_TEST_FILTER}' failed (${test_count} tests registered); see bolt_test.log"
         fi
     else
-        unit_detail="upstream test tree not available (no CMake/ctest build directory); prebuilt images ship no gtest tree"
+        if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
+            unit_status="skipped"
+            unit_detail="skipped: prebuilt image ships no ctest tree (upstream 'make release' does not compile tests)"
+        else
+            unit_detail="upstream test tree not available (no CMake/ctest build directory); prebuilt images ship no gtest tree"
+        fi
     fi
 
     # 3) 最小可用性冒烟:构建产物 libbolt*.so 可被动态链接器加载。
     lib="$(find_bolt_lib || true)"
     if [[ -z "${lib}" ]]; then
         smoke_detail="no libbolt*.so artifact found; full job execution needs the Spark/Gluten backend (out of scope)"
-    elif ldd "${lib}" >"${RESULTS_DIR}/bolt_test.log" 2>&1; then
+    elif ldd "${lib}" >>"${RESULTS_DIR}/bolt_test.log" 2>&1; then
         smoke_status="passed"
         smoke_detail="native library loads cleanly: ${lib} (full Spark/Gluten job execution is out of scope)"
     else
         smoke_detail="native library failed to load: ${lib}; see bolt_test.log"
     fi
 
+    # 只对 failed 判败(skipped 不影响整体,与 spark 用例的 skip 语义一致)。
     local overall="passed"
-    if [[ "${version_status}" != "passed" || "${unit_status}" != "passed" || "${smoke_status}" != "passed" ]]; then
+    if [[ "${version_status}" == "failed" || "${unit_status}" == "failed" || "${smoke_status}" == "failed" ]]; then
         overall="failed"
     fi
     write_functional_result "${overall}" \
