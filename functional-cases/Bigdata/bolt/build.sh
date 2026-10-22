@@ -153,6 +153,21 @@ configure_conan_profile() {
         log "ERROR: failed to configure conan libc settings"
         return 40
     }
+    # GCC 13+ 重组了标准库头(ubuntu 26.04 为 GCC 15),老配方源码里靠传递包含的
+    # <cstdint> 断链(实测 thrift/0.17.0 Mutex.h: 'int64_t' has not been declared)。
+    # 发行版通用解法:对所有 C++ 编译强制 -include cstdint。cstdint 是 C++11 起的
+    # 标准头,对所有 C++ 包安全;仅作用于 host 上下文 CXXFLAGS,C 源码与 build
+    # 上下文工具不受影响。必须放在 libc-settings 脚本之后:该脚本会整体重写 profile。
+    # 上游 bolt.profile 无 [conf],不会覆盖此处的追加值。
+    local conf_flag='tools.build:cxxflags+=["-include cstdint"]'
+    if ! grep -qF 'tools.build:cxxflags' "${profile}"; then
+        if grep -q '^\[conf\]' "${profile}"; then
+            sed -i "s|^\[conf\]|[conf]\n${conf_flag}|" "${profile}"
+        else
+            printf '\n[conf]\n%s\n' "${conf_flag}" >>"${profile}"
+        fi
+        log "profile patched: force-include cstdint for GCC 13+ legacy recipes"
+    fi
 }
 
 # 配置依赖配方远端(对齐上游 scripts/install-bolt-deps.sh,build 模式必做)。
