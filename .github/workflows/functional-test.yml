@@ -140,19 +140,22 @@ jobs:
           PROXY_KUNPENG950: ${{ secrets.PERF_PROXY_KUNPENG950 }}
           HARDWARE: ${{ matrix.hardware }}
         run: |
-          proxy="${PROXY_GLOBAL}"
+          raw="${PROXY_GLOBAL}"
           case "${HARDWARE}" in
-            kunpeng920) [[ -z "${PROXY_KUNPENG920}" ]] || proxy="${PROXY_KUNPENG920}" ;;
-            kunpeng950) [[ -z "${PROXY_KUNPENG950}" ]] || proxy="${PROXY_KUNPENG950}" ;;
+            kunpeng920) [[ -z "${PROXY_KUNPENG920}" ]] || raw="${PROXY_KUNPENG920}" ;;
+            kunpeng950) [[ -z "${PROXY_KUNPENG950}" ]] || raw="${PROXY_KUNPENG950}" ;;
           esac
+          # Secret 常带首尾空白/换行或结尾斜杠,先归一化;未写 scheme 时默认 http。
+          proxy="${raw//[[:space:]]/}"
+          proxy="${proxy%/}"
           if [[ -z "${proxy}" ]]; then
             echo "no proxy configured for ${HARDWARE}"
             exit 0
           fi
-          # 与 .github/scripts/obs_transfer.py 一致:必须是 http(s)://host:port,
-          # 写错时 pip/curl 只会报难懂的 TLS 错误。
-          if [[ ! "${proxy}" =~ ^https?://[^/:]+:[0-9]+$ ]]; then
-            echo "invalid proxy for ${HARDWARE}, expected http(s)://host:port: ${proxy}" >&2
+          [[ "${proxy}" == http://* || "${proxy}" == https://* ]] || proxy="http://${proxy}"
+          # 允许可选凭据 user:pass@,但必须带端口;格式错误时直接失败,避免后续只看到 TLS 报错。
+          if [[ ! "${proxy}" =~ ^https?://([^@/]+@)?[^@/:]+:[0-9]+$ ]]; then
+            echo "cannot parse proxy for ${HARDWARE}; expected [http://][user:pass@]host:port" >&2
             exit 1
           fi
           no_proxy="localhost,127.0.0.1,::1"
