@@ -182,16 +182,59 @@ prepare_bolt_dependencies() {
     log "conan remote bolt-cci-local ready (local-recipes-index: ${cci_home})"
 }
 
+# CMake 版本兼容(build 模式):ubuntu 26.04 系统自带 CMake 4.x,而依赖中的
+# 老配方(实测 ryu/2.0.1)的 CMakeLists 只声明 cmake_minimum_required(<3.5),
+# CMake >= 4 已移除该兼容性,配置直接报错。上游 CI 镜像提供 cmake 3.x
+# (profile 亦 replace_tool_requires 到 cmake/3.31.10,但该替换只作用于声明了
+# cmake tool_requires 的配方,老配方回退到 PATH 里的系统 cmake)。
+# 处理:系统 cmake >= 4 时,pip 安装 cmake<4 到用户目录并前置 PATH,保证
+# 老配方拿到 3.x;另导出 CMAKE_POLICY_VERSION_MINIMUM=3.5 兜底(CMake 4 读取、
+# CMake 3 忽略),防同类旧配方漏网。
+ensure_cmake_compatible() {
+    command -v cmake >/dev/null 2>&1 || {
+        log "ERROR: cmake is unavailable"
+        return 30
+    }
+    local major resolved
+    major="$(cmake --version 2>/dev/null | head -n 1 | sed -n 's/^cmake version \([0-9][0-9]*\)\..*/\1/p' || true)"
+    if [[ -n "${major}" && "${major}" -ge 4 ]]; then
+        log "system cmake ${major}.x breaks legacy third-party recipes (cmake_minimum_required < 3.5); installing cmake<4 via pip"
+        python3 -m pip install --user "cmake<4" ||
+            python3 -m pip install --user --break-system-packages "cmake<4" || {
+            log "ERROR: failed to pip-install cmake<4"
+            return 30
+        }
+        export PATH="${HOME}/.local/bin:${PATH}"
+        hash -r
+        resolved="$(cmake --version 2>/dev/null | head -n 1 || true)"
+        [[ "${resolved}" =~ version\ 3\. ]] || {
+            log "ERROR: cmake<4 did not take precedence in PATH ($(command -v cmake))"
+            return 30
+        }
+        log "cmake for legacy recipes: ${resolved} ($(command -v cmake))"
+    fi
+    export CMAKE_POLICY_VERSION_MINIMUM=3.5
+}
+
 build_bolt() {
     local -a make_args=(BUILD_VERSION="${SOFTWARE_VERSION}")
     configure_conan_profile || return $?
     prepare_bolt_dependencies || return $?
-    # 上游官方镜像同款目标 make release(BOLT_BUILD_TESTING 默认 OFF,不编译测试)。
+    # 直接调用上游 conan_build 目标而非 release:release 的 recipe 会写死
+    # CONAN_OPTIONS="$(CONAN_PRESTO_OPTIONS)",覆盖命令行传入值(上游 Makefile
+    # 注释明确要求传选项时用 conan_build)。选项与 release 目标保持一致,并追加
+    # enable_jit=False:JIT 依赖 llvm-core/19.1.7-bolt 无任何公开二进制包,源码
+    # 编译 2.5h+(实测 8 核 runner 上必超 360 分钟 install 预算)。
+    # enable_paimon=False:再砍 paimon-cpp 及其 avro 依赖链(中等体量),给 360
+    # 分钟预算留余量。JIT/Paimon 均为上游一等公民可选项,smoke/链接用例不涉及;
+    # 交付形态验收由 openEuler 镜像 cell 承担。
+    make_args+=(CONAN_OPTIONS="${BOLT_CONAN_OPTIONS:--o bolt/*:spark_compatible=False -o bolt/*:enable_jit=False -o bolt/*:enable_paimon=False}")
+    # 上游官方 make release 同款构建(BOLT_BUILD_TESTING 默认 OFF,不编译测试)。
     # 测试职责统一收敛到 engine-smoke(两个模式共用同一用例,见 prepare_engine_smoke):
     # gtest 单测需要额外从源码编译 gtest/duckdb/cpr 等重依赖,openEuler 镜像的
     # conan 缓存不含这些包,现场补建代价 1-2 小时以上,故整个矩阵不再跑单测。
     # 首次构建会用 Conan 从源码编译依赖,耗时较长(见 timeout_minutes)。
-    (cd "${BOLT_SOURCE_DIR}" && make release "${make_args[@]}") || {
+    (cd "${BOLT_SOURCE_DIR}" && make conan_build BUILD_TYPE=Release "${make_args[@]}") || {
         log "ERROR: Bolt build failed"
         return 40
     }
@@ -434,6 +477,7 @@ func_install() {
     else
         require_build_commands || return $?
         ensure_conan || return $?
+        ensure_cmake_compatible || return $?
         install_bolt_build || return $?
         # 上游无 tag:actual = 分支名或短 commit;完整 commit sha 记入日志便于追溯。
         actual="$(bolt_effective_ref || true)"

@@ -33,7 +33,10 @@ execution:
     cleanup:
       script: test.sh
       function: func_cleanup
-  # Bolt 源码构建会用 Conan 从源码编译全部依赖(LLVM/Arrow 等),非常重;
+  # Bolt 源码构建会用 Conan 从源码编译全部依赖(folly/Arrow 等),非常重;
+  # build 模式 CONAN_OPTIONS 追加 enable_jit=False(砍掉 llvm-core/19.1.7-bolt,
+  # 该依赖无任何公开二进制,源码编译 2.5h+)与 enable_paimon=False(砍掉
+  # paimon-cpp 及其 avro 依赖链),两者均为上游一等公民可选项;
   # engine-smoke 准备阶段另有 10+20 分钟硬超时的重配置与定向构建。
   timeout_minutes: 360
   # Conan + CMake 完整构建 C++ 引擎,依赖与中间产物都很大。
