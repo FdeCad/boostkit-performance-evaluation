@@ -86,6 +86,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
+      report_matrix: ${{ steps.matrix.outputs.report_matrix }}
     steps:
       - uses: actions/checkout@v4
       - name: Install framework runtime dependency
@@ -111,6 +112,16 @@ jobs:
             --os "${INPUT_OS}" \
             --hardware "${INPUT_HARDWARE}")"
           echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
+          report_matrix="$(printf '%s' "${matrix}" | python3 -c '
+          import json, sys
+          cells = json.load(sys.stdin)["include"]
+          hosts = {cell["hardware"]: cell["runner_label"] for cell in cells}
+          print(json.dumps({"include": [
+              {"hardware": hardware, "runner_label": hosts[hardware]}
+              for hardware in sorted(hosts)
+          ]}, separators=(",", ":")))
+          ')"
+          echo "report_matrix=${report_matrix}" >> "${GITHUB_OUTPUT}"
           echo '### Functional matrix' >> "${GITHUB_STEP_SUMMARY}"
           echo '```json' >> "${GITHUB_STEP_SUMMARY}"
           echo "${matrix}" | python3 -m json.tool >> "${GITHUB_STEP_SUMMARY}"
@@ -127,9 +138,21 @@ jobs:
       - ${{ matrix.runner_label }}
     timeout-minutes: ${{ matrix.job_timeout_minutes }}
     env:
+      # 按类别/软件/版本/系统/硬件/运行 ID-重跑次数分层，直接落在对应自托管 Runner 上。
       PERF_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+      FUNC_OUTPUT_ROOT: /home/runner/boostkit-func-result
+      CELL_RESULT_DIR: /home/runner/boostkit-func-result/${{ matrix.category }}/${{ matrix.software }}/${{ matrix.version }}/${{ matrix.os }}/${{ matrix.hardware }}/${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
+      - name: Initialize local results
+        shell: bash
+        env:
+          MATRIX_JSON: ${{ needs.prepare.outputs.matrix }}
+        run: |
+          mkdir -p "${CELL_RESULT_DIR}"
+          test -w "${CELL_RESULT_DIR}"
+          printf '%s\n' "${MATRIX_JSON}" > "${CELL_RESULT_DIR}/matrix.json"
+          echo "Saving test outputs on this runner: ${CELL_RESULT_DIR}"
       # 自托管 Runner 可能在受限网络中,代理地址由仓库 Secret 提供。
       # 优先级:按硬件的 PERF_PROXY_<HARDWARE> > 全局 PERF_PROXY > 不配代理。
       - name: Resolve proxy settings
@@ -172,8 +195,7 @@ jobs:
             exit 1
           fi
           # 只导出 PERF_PROXY:标准的 http_proxy/HTTPS_PROXY 一旦写进 GITHUB_ENV 会作用于
-          # 整个 job 的所有步骤,连 actions/upload-artifact 也会走代理,遇到自签证书直接失败。
-          # 需要走代理的步骤各自按需引用,框架也会自行派生并注入容器。
+          # 整个 job 的所有步骤。需要走代理的步骤各自按需引用,框架也会自行派生并注入容器。
           echo "PERF_PROXY=${proxy}" >> "${GITHUB_ENV}"
           echo "value=${proxy}" >> "${GITHUB_OUTPUT}"
           # 代理地址属敏感信息,只回显是否配置,不输出地址本身。
@@ -188,9 +210,11 @@ jobs:
           deps="${RUNNER_TEMP}/boostkit-func-deps"
           python3 -m pip install \
             --disable-pip-version-check --no-input --no-cache-dir \
-            --target "${deps}" "PyYAML==6.0.2"
+            --target "${deps}" "PyYAML==6.0.2" \
+            2>&1 | tee "${CELL_RESULT_DIR}/framework-dependency-install.log"
           echo "PYTHONPATH=${deps}" >> "${GITHUB_ENV}"
       - name: Prepare cell and capture environment
+        shell: bash
         run: >-
           python3 functional-framework/run_func_case.py
           --case '${{ matrix.case_path }}'
@@ -199,8 +223,11 @@ jobs:
           --hardware '${{ matrix.hardware }}'
           --architecture '${{ matrix.architecture }}'
           --run-id '${{ env.PERF_RUN_ID }}'
+          --output-root '${{ env.FUNC_OUTPUT_ROOT }}'
           --stage prepare
+          2>&1 | tee "${CELL_RESULT_DIR}/workflow-prepare.log"
       - name: Install software
+        shell: bash
         run: >-
           python3 functional-framework/run_func_case.py
           --case '${{ matrix.case_path }}'
@@ -209,9 +236,12 @@ jobs:
           --hardware '${{ matrix.hardware }}'
           --architecture '${{ matrix.architecture }}'
           --run-id '${{ env.PERF_RUN_ID }}'
+          --output-root '${{ env.FUNC_OUTPUT_ROOT }}'
           --stage install
+          2>&1 | tee "${CELL_RESULT_DIR}/workflow-install.log"
       - name: Run functional checks
         id: execute
+        shell: bash
         run: >-
           python3 functional-framework/run_func_case.py
           --case '${{ matrix.case_path }}'
@@ -220,9 +250,12 @@ jobs:
           --hardware '${{ matrix.hardware }}'
           --architecture '${{ matrix.architecture }}'
           --run-id '${{ env.PERF_RUN_ID }}'
+          --output-root '${{ env.FUNC_OUTPUT_ROOT }}'
           --stage check
+          2>&1 | tee "${CELL_RESULT_DIR}/workflow-check.log"
       - name: Run software cleanup
         if: always()
+        shell: bash
         run: >-
           python3 functional-framework/run_func_case.py
           --case '${{ matrix.case_path }}'
@@ -231,39 +264,68 @@ jobs:
           --hardware '${{ matrix.hardware }}'
           --architecture '${{ matrix.architecture }}'
           --run-id '${{ env.PERF_RUN_ID }}'
+          --output-root '${{ env.FUNC_OUTPUT_ROOT }}'
           --stage cleanup
-      - name: Upload cell result
-        if: always() && matrix.hardware != 'kunpeng950'
-        uses: actions/upload-artifact@v4
-        with:
-          name: func-cell-${{ matrix.software }}-${{ matrix.version }}-${{ matrix.os }}-${{ matrix.hardware }}
-          path: >-
-            .func-output/${{ matrix.category }}/${{ matrix.software }}/${{ matrix.version }}/${{ matrix.os }}/${{ matrix.hardware }}/${{ env.PERF_RUN_ID }}
-          if-no-files-found: warn
+          2>&1 | tee "${CELL_RESULT_DIR}/workflow-cleanup.log"
+      - name: Generate local cell report
+        if: always()
+        shell: bash
+        run: |
+          if [[ -z "${CELL_RESULT_DIR:-}" || ! -d "${CELL_RESULT_DIR}" ]]; then
+            echo "No local result directory was initialized"
+            exit 0
+          fi
+          python3 functional-framework/report_func.py \
+            --input-root "${CELL_RESULT_DIR}" \
+            --output-dir "${CELL_RESULT_DIR}/report" \
+            > "${CELL_RESULT_DIR}/report-generation.log" 2>&1 || {
+              cat "${CELL_RESULT_DIR}/report-generation.log"
+              exit 1
+            }
+          cat "${CELL_RESULT_DIR}/report-generation.log"
+          echo "Results retained at ${CELL_RESULT_DIR}"
 
-  report:
-    name: Generate functional matrix report
-    if: always()
+  local_report:
+    name: Local OS comparison (${{ matrix.hardware }})
+    if: ${{ always() && needs.prepare.result == 'success' }}
     needs: [prepare, cell]
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.report_matrix) }}
+    runs-on:
+      - self-hosted
+      - ${{ matrix.runner_label }}
+    env:
+      FUNC_OUTPUT_ROOT: /home/runner/boostkit-func-result
+      PERF_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+      REPORT_DIR: /home/runner/boostkit-func-result/reports/${{ github.run_id }}-${{ github.run_attempt }}/${{ matrix.hardware }}
     steps:
       - uses: actions/checkout@v4
-      - name: Download cell artifacts
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          path: .func-output/downloaded
-      - name: Generate functional matrix report
-        run: >-
-          python3 functional-framework/report_func.py
-          --input-root .func-output/downloaded
-          --output-dir .func-output/report
-      - name: Publish report in workflow summary
+      - name: Compare this run's Ubuntu and openEuler results
         shell: bash
-        run: cat .func-output/report/combined-report.md >> "${GITHUB_STEP_SUMMARY}"
-      - name: Upload functional report
-        uses: actions/upload-artifact@v4
-        with:
-          name: func-report-${{ github.run_id }}-${{ github.run_attempt }}
-          path: .func-output/report
-          if-no-files-found: error
+        env:
+          MATRIX_JSON: ${{ needs.prepare.outputs.matrix }}
+          REPORT_HARDWARE: ${{ matrix.hardware }}
+        run: |
+          mkdir -p "${REPORT_DIR}"
+          printf '%s\n' "${MATRIX_JSON}" > "${REPORT_DIR}/matrix.json"
+          python3 functional-framework/report_local_func.py \
+            --matrix-file "${REPORT_DIR}/matrix.json" \
+            --output-root "${FUNC_OUTPUT_ROOT}" \
+            --hardware "${REPORT_HARDWARE}" \
+            --run-id "${PERF_RUN_ID}" \
+            --output-dir "${REPORT_DIR}" \
+            2>&1 | tee "${REPORT_DIR}/report-generation.log"
+          echo "OS comparison retained at ${REPORT_DIR}/comparison.md"
+      - name: Show OS comparison in Summary
+        if: always()
+        shell: bash
+        run: |
+          if [[ -s "${REPORT_DIR}/comparison.md" ]]; then
+            cat "${REPORT_DIR}/comparison.md" >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "## 本机功能测试 OS 对比未生成" >> "${GITHUB_STEP_SUMMARY}"
+            echo "请查看 Runner 上的 \`${REPORT_DIR}/report-generation.log\`。" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          echo >> "${GITHUB_STEP_SUMMARY}"
+          echo "报告目录：\`${REPORT_DIR}\`" >> "${GITHUB_STEP_SUMMARY}"

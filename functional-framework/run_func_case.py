@@ -149,8 +149,12 @@ def build_context(args: argparse.Namespace, case: dict[str, Any], config: dict[s
             args.version,
             args.architecture,
         )
+    # 仅显式传入 --output-root 的调用改用持久目录；正式工作流保留默认路径。
+    output_root = args.output_root or ROOT / config["output_root"]
+    if not output_root.is_absolute():
+        raise ValueError("output root must be an absolute path")
     output_dir = (
-        ROOT / config["output_root"] / category / software / args.version
+        output_root / category / software / args.version
         / args.os / args.hardware / args.run_id
     )
     work_root = Path(config["work_root"])
@@ -626,6 +630,7 @@ def main() -> int:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--stage", required=True, choices=FUNC_STAGES)
     parser.add_argument("--architecture", default=None)
+    parser.add_argument("--output-root", type=Path, default=None)
     args = parser.parse_args()
 
     case, errors = validate_case(args.case, ROOT)
