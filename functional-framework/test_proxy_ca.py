@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -76,6 +77,8 @@ class ProxyCATests(unittest.TestCase):
         (self.anchors / ".hidden.crt").write_bytes(b"hidden-certificate\n")
         tool_dir = self.root / "bin"
         tool_dir.mkdir()
+        for command in ("cp", "cat", "mkdir", "touch"):
+            (tool_dir / command).symlink_to(shutil.which(command))
         for family, anchor_path, system_path, updater in (
             ("ubuntu", "/usr/local/share/ca-certificates",
              "/etc/ssl/certs/ca-certificates.crt", "update-ca-certificates"),
@@ -100,8 +103,9 @@ class ProxyCATests(unittest.TestCase):
                     .replace("/tmp/boostkit-proxy-ca-ready", str(marker))
                 )
                 result = subprocess.run(
-                    ["sh", "-ec", script, "sh", family], capture_output=True, text=True,
-                    env={**os.environ, "PATH": f"{tool_dir}:{os.environ['PATH']}"},
+                    ["/bin/sh", "-ec", script, "sh", family],
+                    capture_output=True, text=True,
+                    env={**os.environ, "PATH": str(tool_dir)},
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertTrue(marker.is_file())

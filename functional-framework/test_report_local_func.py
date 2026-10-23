@@ -93,7 +93,7 @@ class LocalReportTests(unittest.TestCase):
         self.matrix_file.write_text(
             json.dumps({"include": [oe, ubuntu, other]}), encoding="utf-8"
         )
-        run_folder = "39916799592-1-2026-10-23T07-17-36Z"
+        run_folder = "39916799592-1_2026-10-23T15-17-36+0800"
         for entry in (oe, ubuntu):
             directory = self.results.joinpath(
                 entry["category"], entry["software"], entry["version"],

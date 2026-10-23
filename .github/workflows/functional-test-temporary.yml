@@ -113,7 +113,7 @@ jobs:
             --os "${INPUT_OS}" \
             --hardware "${INPUT_HARDWARE}")"
           echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
-          echo "run_folder=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(date -u +'%Y-%m-%dT%H-%M-%SZ')" >> "${GITHUB_OUTPUT}"
+          echo "run_folder=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}_$(TZ=Asia/Shanghai date +'%Y-%m-%dT%H-%M-%S%z')" >> "${GITHUB_OUTPUT}"
           report_matrix="$(printf '%s' "${matrix}" | python3 -c '
           import json, sys
           cells = json.load(sys.stdin)["include"]

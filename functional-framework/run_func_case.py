@@ -75,19 +75,23 @@ if [ -s "$system_bundle" ]; then
 else
     : > "$bootstrap_bundle"
 fi
-[ -n "$(find /run/boostkit-proxy-anchors -type f -print -quit)" ] || {
-    echo "no files found in /run/boostkit-proxy-anchors" >&2
-    exit 1
-}
-cp -R /run/boostkit-proxy-anchors/. "$anchor_dir/"
-find /run/boostkit-proxy-anchors -type f \( \
-    -name '*.crt' -o -name '*.pem' -o -name '*.cer' \
-\) -exec sh -c '
-    for source in "$@"; do
-        cat "$source"
-        printf "\n"
+cp -a /run/boostkit-proxy-anchors/. "$anchor_dir/"
+append_certificates() {
+    for certificate in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+        [ -e "$certificate" ] || continue
+        if [ -d "$certificate" ] && [ ! -L "$certificate" ]; then
+            append_certificates "$certificate" "$2" "$3"
+        elif [ -f "$certificate" ]; then
+            case "$3:$certificate" in
+                all:*.crt|all:*.pem|all:*.cer|extra:*.pem|extra:*.cer)
+                    cat "$certificate" >> "$2"
+                    printf '\n' >> "$2"
+                    ;;
+            esac
+        fi
     done
-' sh {} + >> "$bootstrap_bundle"
+}
+append_certificates /run/boostkit-proxy-anchors "$bootstrap_bundle" all
 if ! command -v "$update_command" >/dev/null 2>&1; then
     if [ "$update_command" = update-ca-trust ]; then
         dnf --setopt="sslcacert=$bootstrap_bundle" \
@@ -103,14 +107,7 @@ if [ "$update_command" = update-ca-trust ]; then
 else
     update-ca-certificates
     # Ubuntu 的更新工具只收录 .crt；保留原 .pem 文件名，并直接追加到 curl 使用的 CA bundle。
-    find /run/boostkit-proxy-anchors -type f \( \
-        -name '*.pem' -o -name '*.cer' \
-    \) -exec sh -c '
-        for source in "$@"; do
-            cat "$source"
-            printf "\n"
-        done
-    ' sh {} + >> "$system_bundle"
+    append_certificates /run/boostkit-proxy-anchors "$system_bundle" extra
 fi
 touch /tmp/boostkit-proxy-ca-ready
 echo "[cell] installed proxy CA certificates from mounted anchors"
