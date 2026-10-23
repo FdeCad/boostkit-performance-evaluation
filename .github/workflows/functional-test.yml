@@ -233,7 +233,7 @@ jobs:
           --run-id '${{ env.PERF_RUN_ID }}'
           --stage cleanup
       - name: Upload cell result
-        if: always()
+        if: always() && matrix.hardware != 'kunpeng950'
         uses: actions/upload-artifact@v4
         with:
           name: func-cell-${{ matrix.software }}-${{ matrix.version }}-${{ matrix.os }}-${{ matrix.hardware }}
