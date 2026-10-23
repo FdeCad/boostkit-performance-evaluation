@@ -13,7 +13,7 @@ CloudWeGo 各组件独立发版。用例名中的 `0.16.4` 是 Kitex 源码标�
 | Volo | `volo-thrift-0.12.2` | `volo 0.12.1` | 生成并编译 Rust/Thrift 项目 |
 | Eino | `v0.9.22` | 无 CLI | 编译及离线单元测试 |
 
-CLI 版本来自对应标签内工具自身的版本常量，因此与源码标签不完全相同。[common.sh](common.sh) 分别维护这些期望值，`version` 检查按实际输出中的版本号判定。构建使用 Go `1.24.4`；只接受这个精确版本，缺失时在任务目录安装。`GOTOOLCHAIN=local` 阻止 Go 隐式切换工具链，`GOENV=off` 屏蔽宿主机 Go 配置，`CGO_ENABLED=0`。Go 模块、构建缓存和 Rust/Cargo 的下载及构建目录均在本次任务的工作目录。Rust/Cargo 使用系统包，未在用例中固定编译器版本。
+CLI 版本来自对应标签内工具自身的版本常量，因此与源码标签不完全相同。[common.sh](common.sh) 分别维护这些期望值，`version` 检查按实际输出中的版本号判定。构建使用 Go `1.24.4`；只接受这个精确版本，缺失时在任务目录安装。`GOTOOLCHAIN=local` 阻止 Go 隐式切换工具链，`GOENV=off` 屏蔽宿主机 Go 配置，`CGO_ENABLED=0`。Go 模块默认使用 `GOPROXY=direct` 从源码仓库下载，经框架传入的 HTTP(S) 代理出网，不使用 Go 模块镜像；需要特殊网络路径时可设置 `CLOUDWEGO_PROXY` 覆盖。Go 模块、构建缓存和 Rust/Cargo 的下载及构建目录均在本次任务的工作目录。Rust/Cargo 使用系统包，未在用例中固定编译器版本。
 
 ## 工作流如何运行
 

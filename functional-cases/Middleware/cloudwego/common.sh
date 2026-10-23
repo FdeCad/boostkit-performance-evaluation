@@ -28,8 +28,8 @@ CLOUDWEGO_VOLO_CLI_VERSION="0.12.1"
 CLOUDWEGO_EINO_VERSION="0.9.22"
 CLOUDWEGO_MODULE_BASE="${CLOUDWEGO_MODULE_BASE:-github.com/cloudwego}"
 CLOUDWEGO_SOURCE_BASE="${CLOUDWEGO_SOURCE_BASE:-https://github.com/cloudwego}"
-# 模块依赖通过 Go 代理拉取;与仓库内其它 Go 用例使用同一组镜像。
-CLOUDWEGO_PROXY="${CLOUDWEGO_PROXY:-https://goproxy.cn|https://repo.huaweicloud.com/repository/goproxy/}"
+# 默认直接访问模块源码仓库，经框架注入的 HTTP(S) 代理出网。
+CLOUDWEGO_PROXY="${CLOUDWEGO_PROXY:-direct}"
 # 编译套件的 Go 工具链版本;优先使用 PATH 上的 go,缺失时取官方二进制。
 GO_SRC_VERSION="${GO_SRC_VERSION:-1.24.4}"
 GO_RELEASE_URL="${GO_RELEASE_URL:-https://golang.google.cn/dl}"
