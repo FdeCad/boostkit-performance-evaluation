@@ -319,22 +319,8 @@ def _container_name(context: CellContext) -> str:
     return "".join(char if (char.isalnum() or char in "_.-") else "-" for char in raw)
 
 
-def _pulled_image_marker(context: CellContext) -> Path:
-    return context.work_dir / ".pulled-image"
-
-
-def _record_pulled_image(context: CellContext, image: str) -> None:
-    """Append an image pulled by this cell so cleanup can drop exactly those."""
-    marker = _pulled_image_marker(context)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    existing = marker.read_text(encoding="utf-8").splitlines() if marker.is_file() else []
-    if image in existing:
-        return
-    marker.write_text("\n".join([*existing, image]) + "\n", encoding="utf-8")
-
-
 def _ensure_image(context: CellContext) -> None:
-    """Use the local image when present; otherwise pull it and record that we did."""
+    """Use the local image when present; otherwise pull it."""
     engine = _container_engine()
     image = context.image
     local = subprocess.run(
@@ -347,34 +333,6 @@ def _ensure_image(context: CellContext) -> None:
     pull = subprocess.run([engine, "pull", image])
     if pull.returncode != 0:
         raise RuntimeError(f"failed to pull image {image} (exit code {pull.returncode})")
-    # 四个阶段是四个进程,用标记文件把"本次真的拉过"传给 cleanup 阶段。
-    _record_pulled_image(context, image)
-
-
-def _remove_pulled_image(context: CellContext) -> None:
-    """Drop images this cell pulled; never touch a shared build-mode base image."""
-    marker = _pulled_image_marker(context)
-    if not marker.is_file():
-        return
-    removable: set[str] = set()
-    # prebuilt 镜像与 build_image 都是本用例专用,本次拉过就删;build 模式未声明
-    # build_image 时用的是 OS 基础镜像(如 ubuntu:26.04),删掉会让其他 cell 重新拉取。
-    if context.mode == "prebuilt" or context.build_image:
-        removable.add(context.image)
-    for image in marker.read_text(encoding="utf-8").splitlines():
-        image = image.strip()
-        if not image:
-            continue
-        if image not in removable:
-            print(f"[cell] ignoring unexpected pulled-image marker: {image!r}", flush=True)
-            continue
-        result = subprocess.run(
-            [_container_engine(), "rmi", image], capture_output=True, text=True
-        )
-        if result.returncode == 0:
-            print(f"[cell] removed pulled image {image}", flush=True)
-        else:
-            print(f"[cell] could not remove image {image}: {result.stderr.strip()}", flush=True)
 
 
 def _container_status(engine: str, name: str) -> str:
@@ -789,7 +747,6 @@ def main() -> int:
     if args.stage == "cleanup":
         if context.os_runtime == "container":
             _remove_container(context)
-            _remove_pulled_image(context)
         # 无论 cleanup 是否成功都回收工作目录,否则跑一轮 all 就会把 runner 撑满。
         _remove_work_dir(context)
 
