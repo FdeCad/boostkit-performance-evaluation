@@ -75,40 +75,19 @@ if [ -s "$system_bundle" ]; then
 else
     : > "$bootstrap_bundle"
 fi
-file_count=0
-for source in /run/boostkit-proxy-anchors/*; do
-    [ -f "$source" ] || continue
-    case "$source" in *.crt|*.pem|*.cer) ;; *) continue ;; esac
-    file_count=$((file_count + 1))
-    cert_count=0
-    in_certificate=0
-    while IFS= read -r line || [ -n "$line" ]; do
-        if [ "$line" = '-----BEGIN CERTIFICATE-----' ]; then
-            [ "$in_certificate" -eq 0 ] || {
-                echo "invalid PEM CA certificate in $source" >&2
-                exit 1
-            }
-            cert_count=$((cert_count + 1))
-            output="$anchor_dir/boostkit-proxy-$file_count-$cert_count.crt"
-            in_certificate=1
-        fi
-        if [ "$in_certificate" -eq 1 ]; then
-            printf '%s\n' "$line" >> "$output"
-        fi
-        if [ "$line" = '-----END CERTIFICATE-----' ]; then
-            cat "$output" >> "$bootstrap_bundle"
-            in_certificate=0
-        fi
-    done < "$source"
-    [ "$cert_count" -gt 0 ] && [ "$in_certificate" -eq 0 ] || {
-        echo "invalid PEM CA certificate in $source" >&2
-        exit 1
-    }
-done
-[ "$file_count" -gt 0 ] || {
-    echo "no .crt, .pem or .cer certificates found in /run/boostkit-proxy-anchors" >&2
+[ -n "$(find /run/boostkit-proxy-anchors -type f -print -quit)" ] || {
+    echo "no files found in /run/boostkit-proxy-anchors" >&2
     exit 1
 }
+cp -R /run/boostkit-proxy-anchors/. "$anchor_dir/"
+find /run/boostkit-proxy-anchors -type f \( \
+    -name '*.crt' -o -name '*.pem' -o -name '*.cer' \
+\) -exec sh -c '
+    for source in "$@"; do
+        cat "$source"
+        printf "\n"
+    done
+' sh {} + >> "$bootstrap_bundle"
 if ! command -v "$update_command" >/dev/null 2>&1; then
     if [ "$update_command" = update-ca-trust ]; then
         dnf --setopt="sslcacert=$bootstrap_bundle" \
@@ -123,6 +102,15 @@ if [ "$update_command" = update-ca-trust ]; then
     update-ca-trust extract
 else
     update-ca-certificates
+    # Ubuntu 的更新工具只收录 .crt；保留原 .pem 文件名，并直接追加到 curl 使用的 CA bundle。
+    find /run/boostkit-proxy-anchors -type f \( \
+        -name '*.pem' -o -name '*.cer' \
+    \) -exec sh -c '
+        for source in "$@"; do
+            cat "$source"
+            printf "\n"
+        done
+    ' sh {} + >> "$system_bundle"
 fi
 touch /tmp/boostkit-proxy-ca-ready
 echo "[cell] installed proxy CA certificates from mounted anchors"
@@ -430,12 +418,8 @@ def _proxy_ca_source() -> Path | None:
     path = Path(source)
     if not path.is_absolute() or not path.is_dir():
         raise RuntimeError(f"proxy CA directory is unavailable: {source}")
-    if not any(
-        item.is_file()
-        for suffix in ("*.crt", "*.pem", "*.cer")
-        for item in path.glob(suffix)
-    ):
-        raise RuntimeError(f"proxy CA directory contains no .crt/.pem/.cer files: {source}")
+    if not any(item.is_file() for item in path.rglob("*")):
+        raise RuntimeError(f"proxy CA directory contains no files: {source}")
     return path
 
 
