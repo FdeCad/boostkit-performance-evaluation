@@ -49,6 +49,84 @@ FORWARD_ENV_KEYS = (
 )
 # 代理未单独声明 no_proxy 时的默认排除项:容器内的回环访问不能被代理接管。
 DEFAULT_NO_PROXY = "localhost,127.0.0.1,::1"
+PROXY_CA_MOUNT = "/run/boostkit-proxy-anchors"
+PROXY_CA_BOOTSTRAP = r"""
+set -eu
+if [ -f /tmp/boostkit-proxy-ca-ready ]; then
+    exit 0
+fi
+case "$1" in
+    ubuntu)
+        anchor_dir=/usr/local/share/ca-certificates
+        update_command=update-ca-certificates
+        system_bundle=/etc/ssl/certs/ca-certificates.crt
+        ;;
+    openeuler)
+        anchor_dir=/etc/pki/ca-trust/source/anchors
+        update_command=update-ca-trust
+        system_bundle=/etc/pki/tls/certs/ca-bundle.crt
+        ;;
+    *) echo "unsupported OS for proxy CA setup: $1" >&2; exit 1 ;;
+esac
+mkdir -p "$anchor_dir"
+bootstrap_bundle=/tmp/boostkit-proxy-bootstrap-ca.crt
+if [ -s "$system_bundle" ]; then
+    cat "$system_bundle" > "$bootstrap_bundle"
+else
+    : > "$bootstrap_bundle"
+fi
+file_count=0
+for source in /run/boostkit-proxy-anchors/*; do
+    [ -f "$source" ] || continue
+    case "$source" in *.crt|*.pem|*.cer) ;; *) continue ;; esac
+    file_count=$((file_count + 1))
+    cert_count=0
+    in_certificate=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [ "$line" = '-----BEGIN CERTIFICATE-----' ]; then
+            [ "$in_certificate" -eq 0 ] || {
+                echo "invalid PEM CA certificate in $source" >&2
+                exit 1
+            }
+            cert_count=$((cert_count + 1))
+            output="$anchor_dir/boostkit-proxy-$file_count-$cert_count.crt"
+            in_certificate=1
+        fi
+        if [ "$in_certificate" -eq 1 ]; then
+            printf '%s\n' "$line" >> "$output"
+        fi
+        if [ "$line" = '-----END CERTIFICATE-----' ]; then
+            cat "$output" >> "$bootstrap_bundle"
+            in_certificate=0
+        fi
+    done < "$source"
+    [ "$cert_count" -gt 0 ] && [ "$in_certificate" -eq 0 ] || {
+        echo "invalid PEM CA certificate in $source" >&2
+        exit 1
+    }
+done
+[ "$file_count" -gt 0 ] || {
+    echo "no .crt, .pem or .cer certificates found in /run/boostkit-proxy-anchors" >&2
+    exit 1
+}
+if ! command -v "$update_command" >/dev/null 2>&1; then
+    if [ "$update_command" = update-ca-trust ]; then
+        dnf --setopt="sslcacert=$bootstrap_bundle" \
+            --setopt="proxy_sslcacert=$bootstrap_bundle" install -y ca-certificates
+    else
+        apt-get -o "Acquire::https::CaInfo=$bootstrap_bundle" update
+        DEBIAN_FRONTEND=noninteractive apt-get \
+            -o "Acquire::https::CaInfo=$bootstrap_bundle" install -y ca-certificates
+    fi
+fi
+if [ "$update_command" = update-ca-trust ]; then
+    update-ca-trust extract
+else
+    update-ca-certificates
+fi
+touch /tmp/boostkit-proxy-ca-ready
+echo "[cell] installed proxy CA certificates from mounted anchors"
+"""
 SHELL_FUNCTION_RUNNER = r"""
 script_path="$1"
 function_name="$2"
@@ -344,6 +422,40 @@ def _wait_until_running(engine: str, name: str, attempts: int = 60) -> None:
     raise RuntimeError(f"container {name} did not become exec-ready")
 
 
+def _proxy_ca_source() -> Path | None:
+    """Only the temporary workflow opts in; direct connections need no CA mount."""
+    source = os.environ.get("FUNC_PROXY_CA_DIR", "").strip()
+    if not source or not resolve_proxy():
+        return None
+    path = Path(source)
+    if not path.is_absolute() or not path.is_dir():
+        raise RuntimeError(f"proxy CA directory is unavailable: {source}")
+    if not any(
+        item.is_file()
+        for suffix in ("*.crt", "*.pem", "*.cer")
+        for item in path.glob(suffix)
+    ):
+        raise RuntimeError(f"proxy CA directory contains no .crt/.pem/.cer files: {source}")
+    return path
+
+
+def _install_proxy_ca(engine: str, name: str, environment: dict[str, str], os_name: str) -> None:
+    if os_name.startswith("ubuntu"):
+        family = "ubuntu"
+    elif os_name.startswith("openeuler"):
+        family = "openeuler"
+    else:
+        raise RuntimeError(f"unsupported OS for proxy CA setup: {os_name}")
+    command = [engine, "exec"]
+    for key in ("http_proxy", "https_proxy", "no_proxy", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"):
+        value = environment.get(key)
+        if value is not None:
+            command += ["-e", f"{key}={value}"]
+    command += [name, "sh", "-ec", PROXY_CA_BOOTSTRAP, "sh", family]
+    if subprocess.run(command).returncode != 0:
+        raise RuntimeError(f"failed to install proxy CA certificates in container {name}")
+
+
 def _ensure_container(
     context: CellContext, environment: dict[str, str]
 ) -> str:
@@ -356,10 +468,13 @@ def _ensure_container(
     """
     engine = _container_engine()
     name = _container_name(context)
+    proxy_ca = _proxy_ca_source()
     if _container_status(engine, name):
         if _container_status(engine, name) != "running":
             subprocess.run([engine, "start", name], check=True)
         _wait_until_running(engine, name)
+        if proxy_ca is not None:
+            _install_proxy_ca(engine, name, environment, context.operating_system)
         return name
 
     _ensure_image(context)
@@ -371,6 +486,8 @@ def _ensure_container(
             continue
         mounted.add(target)
         command += ["-v", f"{target}:{target}"]
+    if proxy_ca is not None:
+        command += ["--mount", f"type=bind,src={proxy_ca},dst={PROXY_CA_MOUNT},readonly"]
     command += ["-w", str(context.case_dir)]
     for key in FORWARD_ENV_KEYS:
         value = environment.get(key)
@@ -383,6 +500,8 @@ def _ensure_container(
             f"failed to start container {name} from {context.image}: {result.stderr.strip()}"
         )
     _wait_until_running(engine, name)
+    if proxy_ca is not None:
+        _install_proxy_ca(engine, name, environment, context.operating_system)
     return name
 
 

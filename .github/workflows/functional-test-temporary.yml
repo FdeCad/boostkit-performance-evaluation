@@ -147,6 +147,7 @@ jobs:
       # 按类别/软件/版本/运行 ID-时间/系统分层，直接落在对应自托管 Runner 上。
       PERF_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
       FUNC_OUTPUT_ROOT: /home/runner/boostkit-func-result
+      FUNC_PROXY_CA_DIR: /home/runner/anchors
       CELL_RESULT_DIR: /home/runner/boostkit-func-result/${{ matrix.category }}/${{ matrix.software }}/${{ matrix.version }}/${{ needs.prepare.outputs.run_folder }}/${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
