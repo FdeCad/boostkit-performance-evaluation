@@ -5,12 +5,12 @@
 #
 # 构建(在仓库根目录执行,aarch64 机器):
 #   docker build -f images/functest/smoke/Dockerfile \
-#       -t functest-smoke:oe2403sp4-aarch64 .
+#       -t openeuler/functest-smoke:oe2403sp4-aarch64 .
 #
 # 底座镜像若本地还没有,先用仓库里的定义构建一次:
-#   docker build -t kunpeng/openeuler-24.03-sp4:base images/openeuler-24.03
+#   docker build -t openeuler/openeuler-24.03-sp4:base images/openeuler-24.03
 
-FROM kunpeng/openeuler-24.03-sp4:base
+FROM openeuler/openeuler-24.03-sp4:base
 
 # snappy 1.1.7 的唯一安装前缀是 /usr/local:
 #   lib64/libsnappy.so.1.1.7 + lib64/cmake/Snappy/SnappyConfigVersion.cmake + include/snappy*.h
