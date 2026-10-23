@@ -1,0 +1,269 @@
+name: Functional test (temporary)
+run-name: "Temporary functional test - ${{ inputs.software }} ${{ inputs.version }} (${{ inputs.os }} / ${{ inputs.hardware }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      software:
+        description: "Software under test"
+        required: true
+        default: redis
+        type: choice
+        options:
+          # AI
+          - faiss
+          - hnswlib
+          - openviking
+          - pytorch
+          - scann
+          # Bigdata
+          # - bolt  # 暂停:对应 func_case.yaml 已 enabled: false
+          - flink
+          - spark
+          # Database
+          - mysql
+          - oceanbase
+          - redis
+          - rocksdb
+          # HPC
+          - folly
+          - lz4
+          - protobuf
+          - snappy
+          # - sonic-cpp  # 暂停:对应 func_case.yaml 已 enabled: false
+          # - zstd  # 暂停:对应 func_case.yaml 已 enabled: false
+          # Media
+          - x264
+          - x265
+          # Middleware
+          - brpc
+          - cloudwego
+          # - envoy  # 暂停:对应 func_case.yaml 已 enabled: false
+          - kubernetes
+          # Storage
+          # - ceph  # 暂停:对应 func_case.yaml 已 enabled: false
+          # Toolchain
+          - gcc
+          - glibc
+          - golang
+          - openjdk
+          - python
+          - all
+      version:
+        description: "Software version, comma-separated versions, or all (see the software's func_case.yaml)"
+        required: true
+        default: all
+        type: string
+      os:
+        description: "Operating system"
+        required: true
+        default: all
+        type: choice
+        options:
+          - openeuler-24.03-sp4
+          - ubuntu-26.04.1
+          - all
+      hardware:
+        description: "Hardware"
+        required: true
+        default: all
+        type: choice
+        options:
+          - kunpeng920
+          - kunpeng950
+          - all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: functional-test-runners
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Validate input and build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install framework runtime dependency
+        shell: bash
+        run: |
+          deps="${RUNNER_TEMP}/boostkit-func-deps"
+          python3 -m pip install \
+            --disable-pip-version-check --no-input --no-cache-dir \
+            --target "${deps}" "PyYAML==6.0.2"
+          echo "PYTHONPATH=${deps}" >> "${GITHUB_ENV}"
+      - name: Validate functional catalog and generate matrix
+        id: matrix
+        env:
+          INPUT_SOFTWARE: ${{ inputs.software }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_OS: ${{ inputs.os }}
+          INPUT_HARDWARE: ${{ inputs.hardware }}
+        shell: bash
+        run: |
+          matrix="$(python3 functional-framework/catalog_func.py matrix \
+            --software "${INPUT_SOFTWARE}" \
+            --version "${INPUT_VERSION}" \
+            --os "${INPUT_OS}" \
+            --hardware "${INPUT_HARDWARE}")"
+          echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
+          echo '### Functional matrix' >> "${GITHUB_STEP_SUMMARY}"
+          echo '```json' >> "${GITHUB_STEP_SUMMARY}"
+          echo "${matrix}" | python3 -m json.tool >> "${GITHUB_STEP_SUMMARY}"
+          echo '```' >> "${GITHUB_STEP_SUMMARY}"
+
+  cell:
+    name: ${{ matrix.software }} ${{ matrix.version }} (${{ matrix.os }} / ${{ matrix.hardware }})
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on:
+      - self-hosted
+      - ${{ matrix.runner_label }}
+    timeout-minutes: ${{ matrix.job_timeout_minutes }}
+    env:
+      PERF_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      # 自托管 Runner 可能在受限网络中,代理地址由仓库 Secret 提供。
+      # 优先级:按硬件的 PERF_PROXY_<HARDWARE> > 全局 PERF_PROXY > 不配代理。
+      - name: Resolve proxy settings
+        id: proxy
+        shell: bash
+        env:
+          PROXY_GLOBAL: ${{ secrets.PERF_PROXY }}
+          PROXY_KUNPENG920: ${{ secrets.PERF_PROXY_KUNPENG920 }}
+          PROXY_KUNPENG950: ${{ secrets.PERF_PROXY_KUNPENG950 }}
+          HARDWARE: ${{ matrix.hardware }}
+        run: |
+          # 未单独配置的硬件沿用全局 PERF_PROXY;显式填 none/off/direct 表示该机器可直连,
+          # 完全不用代理(例如 920 有独立出口,不应被卷进 950 的代理)。
+          raw="${PROXY_GLOBAL}"
+          case "${HARDWARE}" in
+            kunpeng920) [[ -z "${PROXY_KUNPENG920}" ]] || raw="${PROXY_KUNPENG920}" ;;
+            kunpeng950) [[ -z "${PROXY_KUNPENG950}" ]] || raw="${PROXY_KUNPENG950}" ;;
+          esac
+          raw="${raw//[[:space:]]/}"
+          case "${raw,,}" in
+            none | off | direct | disable | no)
+              echo "direct connection for ${HARDWARE}"
+              exit 0
+              ;;
+          esac
+          # Secret 常带首尾空白/换行、引号或结尾斜杠,先归一化;未写 scheme 时默认 http。
+          proxy="${raw}"
+          proxy="${proxy%\"}"; proxy="${proxy#\"}"
+          proxy="${proxy%\'}"; proxy="${proxy#\'}"
+          proxy="${proxy%/}"
+          if [[ -z "${proxy}" ]]; then
+            echo "no proxy configured for ${HARDWARE}"
+            exit 0
+          fi
+          [[ "${proxy}" == http://* || "${proxy}" == https://* ]] || proxy="http://${proxy}"
+          # 只校验 scheme 之后存在主机部分;主机名/IPv4/带凭据/IPv6 一律放行,
+          # 避免格式判定误杀导致 cell 在第一步就失败。
+          if [[ ! "${proxy}" =~ ^https?://[^/[:space:]]+$ ]]; then
+            echo "cannot parse proxy for ${HARDWARE}; expected [http://][user:pass@]host[:port]" >&2
+            exit 1
+          fi
+          # 只导出 PERF_PROXY:标准的 http_proxy/HTTPS_PROXY 一旦写进 GITHUB_ENV 会作用于
+          # 整个 job 的所有步骤,连 actions/upload-artifact 也会走代理,遇到自签证书直接失败。
+          # 需要走代理的步骤各自按需引用,框架也会自行派生并注入容器。
+          echo "PERF_PROXY=${proxy}" >> "${GITHUB_ENV}"
+          echo "value=${proxy}" >> "${GITHUB_OUTPUT}"
+          # 代理地址属敏感信息,只回显是否配置,不输出地址本身。
+          echo "proxy configured for ${HARDWARE}"
+      - name: Install framework runtime dependency
+        shell: bash
+        env:
+          http_proxy: ${{ steps.proxy.outputs.value }}
+          https_proxy: ${{ steps.proxy.outputs.value }}
+          no_proxy: localhost,127.0.0.1,::1
+        run: |
+          deps="${RUNNER_TEMP}/boostkit-func-deps"
+          python3 -m pip install \
+            --disable-pip-version-check --no-input --no-cache-dir \
+            --target "${deps}" "PyYAML==6.0.2"
+          echo "PYTHONPATH=${deps}" >> "${GITHUB_ENV}"
+      - name: Prepare cell and capture environment
+        run: >-
+          python3 functional-framework/run_func_case.py
+          --case '${{ matrix.case_path }}'
+          --version '${{ matrix.version }}'
+          --os '${{ matrix.os }}'
+          --hardware '${{ matrix.hardware }}'
+          --architecture '${{ matrix.architecture }}'
+          --run-id '${{ env.PERF_RUN_ID }}'
+          --stage prepare
+      - name: Install software
+        run: >-
+          python3 functional-framework/run_func_case.py
+          --case '${{ matrix.case_path }}'
+          --version '${{ matrix.version }}'
+          --os '${{ matrix.os }}'
+          --hardware '${{ matrix.hardware }}'
+          --architecture '${{ matrix.architecture }}'
+          --run-id '${{ env.PERF_RUN_ID }}'
+          --stage install
+      - name: Run functional checks
+        id: execute
+        run: >-
+          python3 functional-framework/run_func_case.py
+          --case '${{ matrix.case_path }}'
+          --version '${{ matrix.version }}'
+          --os '${{ matrix.os }}'
+          --hardware '${{ matrix.hardware }}'
+          --architecture '${{ matrix.architecture }}'
+          --run-id '${{ env.PERF_RUN_ID }}'
+          --stage check
+      - name: Run software cleanup
+        if: always()
+        run: >-
+          python3 functional-framework/run_func_case.py
+          --case '${{ matrix.case_path }}'
+          --version '${{ matrix.version }}'
+          --os '${{ matrix.os }}'
+          --hardware '${{ matrix.hardware }}'
+          --architecture '${{ matrix.architecture }}'
+          --run-id '${{ env.PERF_RUN_ID }}'
+          --stage cleanup
+      - name: Upload cell result
+        if: always() && matrix.hardware != 'kunpeng950'
+        uses: actions/upload-artifact@v4
+        with:
+          name: func-cell-${{ matrix.software }}-${{ matrix.version }}-${{ matrix.os }}-${{ matrix.hardware }}
+          path: >-
+            .func-output/${{ matrix.category }}/${{ matrix.software }}/${{ matrix.version }}/${{ matrix.os }}/${{ matrix.hardware }}/${{ env.PERF_RUN_ID }}
+          if-no-files-found: warn
+
+  report:
+    name: Generate functional matrix report
+    if: always()
+    needs: [prepare, cell]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download cell artifacts
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          path: .func-output/downloaded
+      - name: Generate functional matrix report
+        run: >-
+          python3 functional-framework/report_func.py
+          --input-root .func-output/downloaded
+          --output-dir .func-output/report
+      - name: Publish report in workflow summary
+        shell: bash
+        run: cat .func-output/report/combined-report.md >> "${GITHUB_STEP_SUMMARY}"
+      - name: Upload functional report
+        uses: actions/upload-artifact@v4
+        with:
+          name: func-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .func-output/report
+          if-no-files-found: error
