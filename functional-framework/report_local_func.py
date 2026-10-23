@@ -19,11 +19,16 @@ def safe_part(value: str) -> str:
     return value
 
 
-def read_cell(cell: dict[str, Any], output_root: Path, run_id: str) -> dict[str, Any]:
+def read_cell(
+    cell: dict[str, Any], output_root: Path, run_id: str, run_folder: str | None = None
+) -> dict[str, Any]:
     parts = [safe_part(str(cell[key])) for key in (
         "category", "software", "version", "os", "hardware"
     )]
-    directory = output_root.joinpath(*parts, safe_part(run_id))
+    if run_folder is None:
+        directory = output_root.joinpath(*parts, safe_part(run_id))
+    else:
+        directory = output_root.joinpath(*parts[:3], safe_part(run_folder), parts[3])
     functional = load_json(directory / "functional_result.json")
     result = load_json(directory / "result.json")
     stage = load_json(directory / "status.json")
@@ -97,15 +102,23 @@ def render_markdown(cells: list[dict[str, Any]], hardware: str, run_id: str) -> 
 
 
 def generate(
-    matrix_file: Path, output_root: Path, hardware: str, run_id: str, output_dir: Path
+    matrix_file: Path, output_root: Path, hardware: str, run_id: str, output_dir: Path,
+    run_folder: str | None = None, category: str | None = None,
+    software: str | None = None, version: str | None = None,
 ) -> dict[str, Any]:
     if not output_root.is_absolute() or not output_dir.is_absolute():
         raise ValueError("output paths must be absolute")
     matrix = json.loads(matrix_file.read_text(encoding="utf-8"))
-    expected = [cell for cell in matrix["include"] if cell["hardware"] == hardware]
+    expected = [
+        cell for cell in matrix["include"]
+        if cell["hardware"] == hardware
+        and (category is None or cell["category"] == category)
+        and (software is None or cell["software"] == software)
+        and (version is None or cell["version"] == version)
+    ]
     if not expected:
         raise ValueError(f"hardware {hardware!r} is absent from the run matrix")
-    cells = [read_cell(cell, output_root, run_id) for cell in expected]
+    cells = [read_cell(cell, output_root, run_id, run_folder) for cell in expected]
     summary = {
         "total_cells": len(cells),
         "passed": sum(cell["status"] == "passed" for cell in cells),
@@ -130,9 +143,14 @@ def main() -> int:
     parser.add_argument("--hardware", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--run-folder")
+    parser.add_argument("--category")
+    parser.add_argument("--software")
+    parser.add_argument("--version")
     args = parser.parse_args()
     summary = generate(
-        args.matrix_file, args.output_root, args.hardware, args.run_id, args.output_dir
+        args.matrix_file, args.output_root, args.hardware, args.run_id, args.output_dir,
+        args.run_folder, args.category, args.software, args.version,
     )
     print(json.dumps(summary, ensure_ascii=False))
     print(f"Local OS comparison: {args.output_dir / 'comparison.md'}")

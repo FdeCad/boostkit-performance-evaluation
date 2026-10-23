@@ -87,6 +87,7 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       report_matrix: ${{ steps.matrix.outputs.report_matrix }}
+      run_folder: ${{ steps.matrix.outputs.run_folder }}
     steps:
       - uses: actions/checkout@v4
       - name: Install framework runtime dependency
@@ -112,13 +113,18 @@ jobs:
             --os "${INPUT_OS}" \
             --hardware "${INPUT_HARDWARE}")"
           echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
+          echo "run_folder=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(date -u +'%Y-%m-%dT%H-%M-%SZ')" >> "${GITHUB_OUTPUT}"
           report_matrix="$(printf '%s' "${matrix}" | python3 -c '
           import json, sys
           cells = json.load(sys.stdin)["include"]
-          hosts = {cell["hardware"]: cell["runner_label"] for cell in cells}
+          keys = {
+              (cell["category"], cell["software"], cell["version"], cell["hardware"]): cell["runner_label"]
+              for cell in cells
+          }
           print(json.dumps({"include": [
-              {"hardware": hardware, "runner_label": hosts[hardware]}
-              for hardware in sorted(hosts)
+              {"category": category, "software": software, "version": version,
+               "hardware": hardware, "runner_label": keys[(category, software, version, hardware)]}
+              for category, software, version, hardware in sorted(keys)
           ]}, separators=(",", ":")))
           ')"
           echo "report_matrix=${report_matrix}" >> "${GITHUB_OUTPUT}"
@@ -138,10 +144,10 @@ jobs:
       - ${{ matrix.runner_label }}
     timeout-minutes: ${{ matrix.job_timeout_minutes }}
     env:
-      # 按类别/软件/版本/系统/硬件/运行 ID-重跑次数分层，直接落在对应自托管 Runner 上。
+      # 按类别/软件/版本/运行 ID-时间/系统分层，直接落在对应自托管 Runner 上。
       PERF_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
       FUNC_OUTPUT_ROOT: /home/runner/boostkit-func-result
-      CELL_RESULT_DIR: /home/runner/boostkit-func-result/${{ matrix.category }}/${{ matrix.software }}/${{ matrix.version }}/${{ matrix.os }}/${{ matrix.hardware }}/${{ github.run_id }}-${{ github.run_attempt }}
+      CELL_RESULT_DIR: /home/runner/boostkit-func-result/${{ matrix.category }}/${{ matrix.software }}/${{ matrix.version }}/${{ needs.prepare.outputs.run_folder }}/${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Initialize local results
@@ -223,7 +229,7 @@ jobs:
           --hardware '${{ matrix.hardware }}'
           --architecture '${{ matrix.architecture }}'
           --run-id '${{ env.PERF_RUN_ID }}'
-          --output-root '${{ env.FUNC_OUTPUT_ROOT }}'
+          --result-dir '${{ env.CELL_RESULT_DIR }}'
           --stage prepare
           2>&1 | tee "${CELL_RESULT_DIR}/workflow-prepare.log"
       - name: Install software
@@ -236,7 +242,7 @@ jobs:
           --hardware '${{ matrix.hardware }}'
           --architecture '${{ matrix.architecture }}'
           --run-id '${{ env.PERF_RUN_ID }}'
-          --output-root '${{ env.FUNC_OUTPUT_ROOT }}'
+          --result-dir '${{ env.CELL_RESULT_DIR }}'
           --stage install
           2>&1 | tee "${CELL_RESULT_DIR}/workflow-install.log"
       - name: Run functional checks
@@ -250,7 +256,7 @@ jobs:
           --hardware '${{ matrix.hardware }}'
           --architecture '${{ matrix.architecture }}'
           --run-id '${{ env.PERF_RUN_ID }}'
-          --output-root '${{ env.FUNC_OUTPUT_ROOT }}'
+          --result-dir '${{ env.CELL_RESULT_DIR }}'
           --stage check
           2>&1 | tee "${CELL_RESULT_DIR}/workflow-check.log"
       - name: Run software cleanup
@@ -264,7 +270,7 @@ jobs:
           --hardware '${{ matrix.hardware }}'
           --architecture '${{ matrix.architecture }}'
           --run-id '${{ env.PERF_RUN_ID }}'
-          --output-root '${{ env.FUNC_OUTPUT_ROOT }}'
+          --result-dir '${{ env.CELL_RESULT_DIR }}'
           --stage cleanup
           2>&1 | tee "${CELL_RESULT_DIR}/workflow-cleanup.log"
       - name: Generate local cell report
@@ -286,7 +292,7 @@ jobs:
           echo "Results retained at ${CELL_RESULT_DIR}"
 
   local_report:
-    name: Local OS comparison (${{ matrix.hardware }})
+    name: Local OS comparison (${{ matrix.software }} ${{ matrix.version }} / ${{ matrix.hardware }})
     if: ${{ always() && needs.prepare.result == 'success' }}
     needs: [prepare, cell]
     strategy:
@@ -298,7 +304,7 @@ jobs:
     env:
       FUNC_OUTPUT_ROOT: /home/runner/boostkit-func-result
       PERF_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
-      REPORT_DIR: /home/runner/boostkit-func-result/reports/${{ github.run_id }}-${{ github.run_attempt }}/${{ matrix.hardware }}
+      REPORT_DIR: /home/runner/boostkit-func-result/${{ matrix.category }}/${{ matrix.software }}/${{ matrix.version }}/${{ needs.prepare.outputs.run_folder }}/report
     steps:
       - uses: actions/checkout@v4
       - name: Compare this run's Ubuntu and openEuler results
@@ -314,6 +320,10 @@ jobs:
             --output-root "${FUNC_OUTPUT_ROOT}" \
             --hardware "${REPORT_HARDWARE}" \
             --run-id "${PERF_RUN_ID}" \
+            --run-folder '${{ needs.prepare.outputs.run_folder }}' \
+            --category '${{ matrix.category }}' \
+            --software '${{ matrix.software }}' \
+            --version '${{ matrix.version }}' \
             --output-dir "${REPORT_DIR}" \
             2>&1 | tee "${REPORT_DIR}/report-generation.log"
           echo "OS comparison retained at ${REPORT_DIR}/comparison.md"

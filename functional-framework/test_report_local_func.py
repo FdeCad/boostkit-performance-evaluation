@@ -86,6 +86,38 @@ class LocalReportTests(unittest.TestCase):
         summary = generate(self.matrix_file, self.results, "kunpeng920", "123-1", self.report)
         self.assertEqual(summary["failed"], 1)
 
+    def test_run_folder_groups_systems_and_report_by_software(self):
+        oe = cell("openeuler-24.03-sp4")
+        ubuntu = cell("ubuntu-26.04.1")
+        other = {**cell("ubuntu-26.04.1"), "software": "x264", "version": "0480cb05"}
+        self.matrix_file.write_text(
+            json.dumps({"include": [oe, ubuntu, other]}), encoding="utf-8"
+        )
+        run_folder = "39916799592-1-2026-10-23T07-17-36Z"
+        for entry in (oe, ubuntu):
+            directory = self.results.joinpath(
+                entry["category"], entry["software"], entry["version"],
+                run_folder, entry["os"],
+            )
+            directory.mkdir(parents=True)
+            (directory / "functional_result.json").write_text(
+                json.dumps({"status": "passed", "checks": []}), encoding="utf-8"
+            )
+        report = self.results / "Middleware" / "cloudwego" / "0.16.4" / run_folder / "report"
+        summary = generate(
+            self.matrix_file, self.results, "kunpeng920", "39916799592-1", report,
+            run_folder=run_folder, category="Middleware", software="cloudwego", version="0.16.4",
+        )
+        self.assertEqual(summary, {
+            "total_cells": 2, "passed": 2, "failed": 0, "missing_or_unknown": 0,
+        })
+        self.assertTrue((report / "comparison.md").is_file())
+        self.assertEqual(
+            {Path(cell_result["result_dir"]).name for cell_result in
+             json.loads((report / "comparison.json").read_text())["cells"]},
+            {"openeuler-24.03-sp4", "ubuntu-26.04.1"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
