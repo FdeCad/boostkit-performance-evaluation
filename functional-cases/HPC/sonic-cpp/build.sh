@@ -68,15 +68,35 @@ prepare_sonic_cpp_source() {
     }
 }
 
+# sonic-cpp 的 external.cmake 用 GIT_TAG master 拉 gflags,上游默认分支已改名为 main,
+# FetchContent 浅克隆必然失败。这里预先检出固定发布版本,configure 时交给 FetchContent 直接用。
+prepare_sonic_cpp_gflags() {
+    local dir="${PERF_WORK_DIR}/sonic-cpp-deps/gflags"
+    if [[ ! -d "${dir}/.git" ]]; then
+        mkdir -p "$(dirname "${dir}")"
+        log "cloning gflags ${SONIC_GFLAGS_TAG} from ${SONIC_GFLAGS_URL}"
+        git clone --quiet --depth 1 --branch "${SONIC_GFLAGS_TAG}" \
+            "${SONIC_GFLAGS_URL}" "${dir}" || {
+            log "ERROR: failed to clone gflags ${SONIC_GFLAGS_TAG}"
+            return 30
+        }
+    fi
+}
+
 build_sonic_cpp() {
     [[ ! -e "${BUILD_DIR}" ]] || {
         log "ERROR: build directory is not clean: ${BUILD_DIR}"
         return 20
     }
     prepare_sonic_cpp_source || return $?
+    prepare_sonic_cpp_gflags || return $?
+    local gflags_dir="${PERF_WORK_DIR}/sonic-cpp-deps/gflags"
     log "building sonic-cpp library and official benchmark target 'bench'"
+    # 上游 tests/memcmp_test.cpp 无条件引用 AVX2 的 immintrin.h,aarch64 上没有该头文件,
+    # 单元测试目标无法编译;功能测试只需要库和官方 benchmark,故关闭 unittest。
     cmake -S "${SOURCE_DIR}" -B "${BUILD_DIR}" \
-        -DCMAKE_BUILD_TYPE=Release -DBUILD_BENCH=ON || {
+        -DCMAKE_BUILD_TYPE=Release -DBUILD_BENCH=ON -DBUILD_UNITTEST=OFF \
+        -DFETCHCONTENT_SOURCE_DIR_GFLAGS="${gflags_dir}" || {
         log "ERROR: cmake configure of sonic-cpp failed"
         return 40
     }
@@ -92,8 +112,8 @@ build_sonic_cpp() {
         log "ERROR: official benchmark binary was not produced: ${SONIC_BENCH}"
         return 40
     }
-    resolve_sonic_lib >/dev/null || {
-        log "ERROR: libsonic was not produced under ${BUILD_DIR}"
+    resolve_sonic_header >/dev/null || {
+        log "ERROR: sonic-cpp headers were not found under ${SONIC_INCLUDE}"
         return 40
     }
 }
