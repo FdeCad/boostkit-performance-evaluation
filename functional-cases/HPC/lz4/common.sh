@@ -16,6 +16,11 @@ RESULTS_DIR="${RESULTS_DIR:-}"
 PERF_ACTUAL_VERSION_FILE="${PERF_ACTUAL_VERSION_FILE:-}"
 
 LZ4_SOURCE_URL="${LZ4_SOURCE_URL:-https://github.com/lz4/lz4.git}"
+# 离线镜像内置源码缓存优先;缓存缺失时回退上游官方源(联网场景行为不变)。
+BOOSTKIT_SRC_ROOT="${BOOSTKIT_SRC_ROOT:-/opt/boostkit/src}"
+if [[ -d "${BOOSTKIT_SRC_ROOT}/lz4.git" ]]; then
+    LZ4_SOURCE_URL="file://${BOOSTKIT_SRC_ROOT}/lz4.git"
+fi
 # 上游 lz4 tests/Makefile 的核心子集目标(不含 32 位/valgrind/speed 等重项)。
 LZ4_UPSTREAM_TEST_TARGET="${LZ4_UPSTREAM_TEST_TARGET:-test-lz4-essentials}"
 

@@ -33,6 +33,14 @@ CLOUDWEGO_PROXY="${CLOUDWEGO_PROXY:-https://goproxy.cn|https://repo.huaweicloud.
 # 编译套件的 Go 工具链版本;优先使用 PATH 上的 go,缺失时取官方二进制。
 GO_SRC_VERSION="${GO_SRC_VERSION:-1.24.4}"
 GO_RELEASE_URL="${GO_RELEASE_URL:-https://golang.google.cn/dl}"
+# 离线镜像内置源码缓存优先;缓存缺失时回退上游官方源(联网场景行为不变)。
+BOOSTKIT_SRC_ROOT="${BOOSTKIT_SRC_ROOT:-/opt/boostkit/src}"
+if [[ -d "${BOOSTKIT_SRC_ROOT}/cloudwego" ]]; then
+    CLOUDWEGO_SOURCE_BASE="file://${BOOSTKIT_SRC_ROOT}/cloudwego"
+fi
+if [[ -d "${BOOSTKIT_SRC_ROOT}/go" ]]; then
+    GO_RELEASE_URL="file://${BOOSTKIT_SRC_ROOT}/go"
+fi
 
 SOURCE_DIR=""
 GO_DIR=""
@@ -175,8 +183,15 @@ configure_runtime_paths() {
     fi
     export PATH="${INSTALL_DIR}/bin:${PATH}"
     export INSTALL_DIR KITEX_BIN HZ_BIN VOLO_BIN
-    export CARGO_HOME="${PERF_WORK_DIR}/cargo"
     export CARGO_TARGET_DIR="${PERF_WORK_DIR}/cargo-target"
+    # cargo 环境默认任务私有;离线镜像内置 crates 缓存时改用它并强制离线,
+    # 否则 cargo 会去 index.crates.io 更新索引,拔网线后直接失败。
+    if [[ -d "${BOOSTKIT_SRC_ROOT}/cargo/registry/cache" ]]; then
+        export CARGO_HOME="${BOOSTKIT_SRC_ROOT}/cargo"
+        export CARGO_NET_OFFLINE=true
+    else
+        export CARGO_HOME="${PERF_WORK_DIR}/cargo"
+    fi
     export CGO_ENABLED=0 GO111MODULE=on VOLO_DISABLE_UPDATE_CHECK=1
     GO_DIR="${PERF_WORK_DIR}/go${GO_SRC_VERSION}"
 
@@ -191,6 +206,12 @@ configure_runtime_paths() {
     export GOCACHE="${PERF_WORK_DIR}/gocache"
     # 保留既有代理环境的校验服务设置。
     export GOSUMDB=off
+    # 离线镜像内置模块缓存优先:命中则整个依赖解析过程断网完成。
+    if [[ -d "${BOOSTKIT_SRC_ROOT}/gomodcache" ]]; then
+        export GOMODCACHE="${BOOSTKIT_SRC_ROOT}/gomodcache"
+        export GOFLAGS=-mod=mod
+        export GOPROXY=off
+    fi
 
     resolve_go_toolchain || true
     [[ -z "${GO_BIN}" ]] || export PATH="$(dirname "${GO_BIN}"):${PATH}"

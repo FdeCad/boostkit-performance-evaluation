@@ -16,6 +16,11 @@ RESULTS_DIR="${RESULTS_DIR:-}"
 PERF_ACTUAL_VERSION_FILE="${PERF_ACTUAL_VERSION_FILE:-}"
 
 ZSTD_SOURCE_URL="${ZSTD_SOURCE_URL:-https://github.com/facebook/zstd.git}"
+# 离线镜像内置源码缓存优先;缓存缺失时回退上游官方源(联网场景行为不变)。
+BOOSTKIT_SRC_ROOT="${BOOSTKIT_SRC_ROOT:-/opt/boostkit/src}"
+if [[ -d "${BOOSTKIT_SRC_ROOT}/zstd.git" ]]; then
+    ZSTD_SOURCE_URL="file://${BOOSTKIT_SRC_ROOT}/zstd.git"
+fi
 # 上游短测入口脚本(不带 --test-large-data)。
 ZSTD_PLAY_TESTS="${ZSTD_PLAY_TESTS:-playTests.sh}"
 

@@ -1,0 +1,7 @@
+# 构建上下文是仓库根目录,这里排掉与镜像无关的大目录。
+.git
+.func-output
+software
+__pycache__
+**/__pycache__
+*.pyc

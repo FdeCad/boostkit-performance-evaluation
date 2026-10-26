@@ -13,6 +13,14 @@ source "${SCRIPT_DIR}/common.sh"
 BRPC_BASE_LINK_LIBS=(-lbrpc -lprotobuf -lgflags -lssl -lcrypto -lleveldb -lsnappy -lz -lpthread -ldl -lrt)
 BRPC_LINK_LIBS=()
 
+# 头文件搜索顺序:额外头文件根目录(与 libbrpc 同版本的 protobuf)→ brpc 安装前缀。
+# 必须在 configure_runtime_paths 之后调用。
+brpc_include_args() {
+    BRPC_CXX_INCLUDES=()
+    [[ -z "${BRPC_EXTRA_INCLUDE}" ]] || BRPC_CXX_INCLUDES+=(-I"${BRPC_EXTRA_INCLUDE}")
+    BRPC_CXX_INCLUDES+=(-I"${BRPC_INCLUDE_DIR}")
+}
+
 # 组装最终链接行:基础依赖 + absl 共享库绝对路径(存在才追加,protobuf>=22 需要;
 # 传 .so 绝对路径可解掉静态 libbrpc 成员对 absl 符号的未定义引用)。
 build_link_libs() {
@@ -97,10 +105,15 @@ compile_echo_example() {
     cp "${example_dir}/echo.proto" "${example_dir}/server.cpp" "${example_dir}/client.cpp" "${work}/"
     (
         cd "${work}"
-        protoc --cpp_out=. echo.proto
-        c++ -std=c++17 -O2 -I. -I"${BRPC_INCLUDE_DIR}" -o "${BRPC_ECHO_SERVER_BIN}" \
+        # 必须用与 libbrpc 同版本的 protoc:生成的 pb 代码要和 brpc 头文件那套 protobuf 对齐。
+        [[ -n "${BRPC_PROTOC_BIN}" ]] || {
+            log "ERROR: protoc is required to build the upstream echo example"
+            return 40
+        }
+        "${BRPC_PROTOC_BIN}" --cpp_out=. echo.proto
+        c++ -std=c++17 -O2 -I. "${BRPC_CXX_INCLUDES[@]}" -o "${BRPC_ECHO_SERVER_BIN}" \
             server.cpp echo.pb.cc -L"${BRPC_LIB_DIR}" "${BRPC_LINK_LIBS[@]}"
-        c++ -std=c++17 -O2 -I. -I"${BRPC_INCLUDE_DIR}" -o "${BRPC_ECHO_CLIENT_BIN}" \
+        c++ -std=c++17 -O2 -I. "${BRPC_CXX_INCLUDES[@]}" -o "${BRPC_ECHO_CLIENT_BIN}" \
             client.cpp echo.pb.cc -L"${BRPC_LIB_DIR}" "${BRPC_LINK_LIBS[@]}"
     ) || {
         log "ERROR: failed to compile the upstream echo example"
@@ -124,7 +137,7 @@ int main() {
     return 0;
 }
 CPP
-    c++ -std=c++17 -O2 -I"${BRPC_INCLUDE_DIR}" -o "${BRPC_LINK_SMOKE_BIN}" \
+    c++ -std=c++17 -O2 "${BRPC_CXX_INCLUDES[@]}" -o "${BRPC_LINK_SMOKE_BIN}" \
         "${HARNESS_DIR}/link_smoke.cpp" -L"${BRPC_LIB_DIR}" "${BRPC_LINK_LIBS[@]}" || {
         log "ERROR: failed to link the minimal brpc smoke program"
         return 40
@@ -214,6 +227,7 @@ func_install() {
     fi
 
     build_link_libs
+    brpc_include_args
     compile_echo_example "${BRPC_SOURCE_TREE}" || return $?
     compile_link_smoke || return $?
     actual="$(detect_brpc_version || true)"

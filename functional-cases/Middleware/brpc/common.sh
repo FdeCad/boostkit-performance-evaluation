@@ -16,6 +16,11 @@ RESULTS_DIR="${RESULTS_DIR:-}"
 PERF_ACTUAL_VERSION_FILE="${PERF_ACTUAL_VERSION_FILE:-}"
 
 BRPC_SOURCE_URL="${BRPC_SOURCE_URL:-https://github.com/apache/brpc.git}"
+# 离线镜像内置源码缓存优先;缓存缺失时回退上游官方源(联网场景行为不变)。
+BOOSTKIT_SRC_ROOT="${BOOSTKIT_SRC_ROOT:-/opt/boostkit/src}"
+if [[ -d "${BOOSTKIT_SRC_ROOT}/brpc.git" ]]; then
+    BRPC_SOURCE_URL="file://${BOOSTKIT_SRC_ROOT}/brpc.git"
+fi
 # prebuilt 模式下镜像若已内置 brpc 源码树(含 example/echo_c++ 与 RELEASE_VERSION)，可用 BRPC_SOURCE_TREE 显式指向;
 # 缺省时 install 阶段会浅克隆上游源码，以便复用官方 example/echo_c++。
 BRPC_SOURCE_TREE="${BRPC_SOURCE_TREE:-}"
@@ -25,6 +30,10 @@ BUILD_DIR=""
 INSTALL_DIR=""
 BRPC_INCLUDE_DIR=""
 BRPC_LIB_DIR=""
+BRPC_PROTOC_BIN=""
+# 可选的额外头文件根目录,编译时排在系统目录之前。组镜像里 /usr/local/include 可能装了
+# 另一套 protobuf(版本更高),需要用镜像预置的同版本头文件副本压住它。
+BRPC_EXTRA_INCLUDE="${BRPC_EXTRA_INCLUDE:-}"
 SERVICE_DIR=""
 HARNESS_DIR=""
 BRPC_ECHO_PORT=""
@@ -89,6 +98,26 @@ pick_existing_dir() {
     return 1
 }
 
+# 定位真正安装了 brpc 的安装前缀(判据:含 include/brpc/server.h)。
+# 组镜像里可能同时装了多套第三方库(libbrpc 依赖 protobuf 25.1,别的软件把 36.2 装到
+# /usr/local),只按目录存在选前缀会把 brpc 的头文件、库和 protoc 全部配错。
+resolve_brpc_prefix() {
+    local candidate
+    for candidate in "${BRPC_PREFIX:-}" /usr/local /opt/brpc /usr; do
+        [[ -n "${candidate}" ]] || continue
+        [[ -f "${candidate}/include/brpc/server.h" ]] && {
+            printf '%s\n' "${candidate}"
+            return 0
+        }
+    done
+    printf '%s\n' "${BRPC_PREFIX:-/usr/local}"
+}
+
+# 优先使用安装前缀自带的可执行文件,缺失时调用方回退 PATH。
+pick_existing_bin() {
+    [[ -n "$1" && -x "$1" ]] && printf '%s\n' "$1"
+}
+
 configure_runtime_paths() {
     if [[ -z "${PERF_RUN_ID}" ]]; then
         PERF_RUN_ID="local-$(date -u '+%Y%m%dT%H%M%SZ')-$$"
@@ -116,13 +145,11 @@ configure_runtime_paths() {
 
     if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
         # 镜像已装好 brpc:定位头文件与静态库;源码树用于官方 example(缺失时 install 阶段浅克隆)。
+        # 头文件/库/protoc 必须来自同一个安装前缀,否则会撞上同镜像里另一套 protobuf。
         local prefix
-        prefix="${BRPC_PREFIX:-}"
-        if [[ -z "${prefix}" ]]; then
-            prefix="$(pick_existing_dir /usr/local /opt/brpc /usr || printf '/usr/local')"
-        fi
-        BRPC_INCLUDE_DIR="${BRPC_INCLUDE_DIR:-$(pick_existing_dir "${prefix}/include" /usr/local/include /usr/include || printf '%s' "${prefix}/include")}"
-        BRPC_LIB_DIR="${BRPC_LIB_DIR:-$(pick_existing_dir "${prefix}/lib" "${prefix}/lib64" /usr/local/lib /usr/lib || printf '%s' "${prefix}/lib")}"
+        prefix="$(resolve_brpc_prefix)"
+        BRPC_INCLUDE_DIR="${BRPC_INCLUDE_DIR:-${prefix}/include}"
+        BRPC_LIB_DIR="${BRPC_LIB_DIR:-$(pick_existing_dir "${prefix}/lib" "${prefix}/lib64" /usr/lib /usr/lib64 || printf '%s' "${prefix}/lib")}"
         SOURCE_DIR=""
     else
         SOURCE_DIR="${PERF_WORK_DIR}/brpc-source"
@@ -131,6 +158,8 @@ configure_runtime_paths() {
         BRPC_INCLUDE_DIR="${INSTALL_DIR}/include"
         BRPC_LIB_DIR="${INSTALL_DIR}/lib"
     fi
+    # protoc 与 brpc 的头文件版本必须一致:优先用安装前缀自带的编译器(PATH 里可能是别家的)。
+    BRPC_PROTOC_BIN="${BRPC_PROTOC_BIN:-$(pick_existing_bin "$(dirname "${BRPC_INCLUDE_DIR}")/bin/protoc" || command -v protoc || true)}"
 
     BRPC_ECHO_SERVER_BIN="${SERVICE_DIR}/echo_server"
     BRPC_ECHO_CLIENT_BIN="${SERVICE_DIR}/echo_client"
@@ -144,7 +173,7 @@ configure_runtime_paths() {
 
     export SOFTWARE_NAME CATEGORY SOFTWARE_VERSION EXPECTED_ARCH FUNC_OS FUNC_HARDWARE FUNC_MODE
     export PERF_RUN_ID PERF_WORK_DIR RESULTS_DIR PERF_ACTUAL_VERSION_FILE TMPDIR
-    export BRPC_SOURCE_TREE BRPC_INCLUDE_DIR BRPC_LIB_DIR BRPC_ECHO_PORT
+    export BRPC_SOURCE_TREE BRPC_INCLUDE_DIR BRPC_LIB_DIR BRPC_PROTOC_BIN BRPC_EXTRA_INCLUDE BRPC_ECHO_PORT
 }
 
 initialize_runtime() {
@@ -339,20 +368,25 @@ resolve_brpc_source_tree() {
 # protobuf >= 22 链接 abseil;镜像里 libbrpc/libprotobuf 的 absl 依赖必须出现在链接行,
 # 否则 GNU ld 以 "DSO missing from command line" 报错。缺失的具体组件无法枚举,
 # 全量发现最稳;系统没有 absl(如 protobuf 3.21)时输出为空,行为不变。
+# 只取第一个命中的目录:组镜像可能同时存在两套 absl(25.1/36.2 各一份),
+# 混着链接会出现同名符号跨版本解析错误。
 # 纯输出,供命令替换/映射调用。
 absl_dso_paths() {
-    local dir lib real
+    local dir lib real found
     local -a dirs=("${BRPC_LIB_DIR:-}" /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib)
     local -A seen=()
     for dir in "${dirs[@]}"; do
         [[ -n "${dir}" && -d "${dir}" ]] || continue
+        found=0
         for lib in "${dir}"/libabsl_*.so*; do
             [[ -e "${lib}" ]] || continue
             real="$(readlink -f "${lib}" 2>/dev/null)" || real="${lib}"
             [[ -n "${real}" && -z "${seen[${real}]:-}" ]] || continue
             seen["${real}"]=1
+            found=1
             printf '%s\n' "${real}"
         done
+        [[ "${found}" -eq 0 ]] || return 0
     done
     return 0
 }

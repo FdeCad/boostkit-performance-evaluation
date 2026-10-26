@@ -296,9 +296,18 @@ install_os_packages() {
 }
 
 # 运行期依赖:gflags 必装(否则 db_bench 无法启动);压缩库开发包为可选,装不上则编译降级。
+# 离线镜像已内置这些开发包时直接跳过:断网环境下 dnf 必然失败,会把 api-smoke 判死。
 ensure_rocksdb_runtime_deps() {
-    install_os_packages rocksdb-gflags || return 30
-    install_os_packages rocksdb-libs || log "WARN: optional compression dev packages unavailable"
+    if [[ -f /usr/include/gflags/gflags.h ]]; then
+        log "gflags development files already present; skipping package install"
+    else
+        install_os_packages rocksdb-gflags || return 30
+    fi
+    if [[ -f /usr/include/snappy.h ]]; then
+        log "compression development files already present; skipping package install"
+    else
+        install_os_packages rocksdb-libs || log "WARN: optional compression dev packages unavailable"
+    fi
 }
 
 # 按 db_bench 的动态链接实况补齐缺失的运行时库。

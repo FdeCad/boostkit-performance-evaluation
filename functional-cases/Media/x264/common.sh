@@ -16,6 +16,11 @@ RESULTS_DIR="${RESULTS_DIR:-}"
 PERF_ACTUAL_VERSION_FILE="${PERF_ACTUAL_VERSION_FILE:-}"
 
 X264_ARCHIVE_URL="${X264_ARCHIVE_URL:-https://github.com/mirror/x264/archive/0480cb05.tar.gz}"
+# 离线镜像内置源码缓存优先;缓存缺失时回退上游官方源(联网场景行为不变)。
+BOOSTKIT_SRC_ROOT="${BOOSTKIT_SRC_ROOT:-/opt/boostkit/src}"
+if [[ -f "${BOOSTKIT_SRC_ROOT}/x264/${SOFTWARE_VERSION}.tar.gz" ]]; then
+    X264_ARCHIVE_URL="file://${BOOSTKIT_SRC_ROOT}/x264/${SOFTWARE_VERSION}.tar.gz"
+fi
 X264_ARCHIVE_SHA256="d0967a1348c85dfde363bb52610403be898171493100561efa0dd05d5fd1ae50"
 # 上游测试树所需的源码目录(必须含可构建的 configure 与 Makefile)。
 X264_SOURCE_DIR="${X264_SOURCE_DIR:-}"

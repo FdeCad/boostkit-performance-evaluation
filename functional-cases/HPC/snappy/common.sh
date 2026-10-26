@@ -17,6 +17,11 @@ PERF_ACTUAL_VERSION_FILE="${PERF_ACTUAL_VERSION_FILE:-}"
 
 # 参考镜像的构建来源:GitHub 官方 tag 归档(与参考 Dockerfile 的下载地址一致)。
 SNAPPY_RELEASE_BASE="${SNAPPY_RELEASE_BASE:-https://github.com/google/snappy/archive/refs/tags}"
+# 离线镜像内置源码缓存优先;缓存缺失时回退上游官方源(联网场景行为不变)。
+BOOSTKIT_SRC_ROOT="${BOOSTKIT_SRC_ROOT:-/opt/boostkit/src}"
+if [[ -f "${BOOSTKIT_SRC_ROOT}/snappy/${SOFTWARE_VERSION}.tar.gz" ]]; then
+    SNAPPY_RELEASE_BASE="file://${BOOSTKIT_SRC_ROOT}/snappy"
+fi
 
 # 运行期路径(configure_runtime_paths 里按模式赋值)。
 SNAPPY_ARCHIVE=""

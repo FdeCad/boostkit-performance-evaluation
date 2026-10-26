@@ -19,6 +19,14 @@ FOLLY_SOURCE_URL="${FOLLY_SOURCE_URL:-https://github.com/facebook/folly.git}"
 # fast_float 是 folly 的必需依赖,多数发行版不提供;缺失时取官方版本到私有目录。
 FAST_FLOAT_SOURCE_URL="${FAST_FLOAT_SOURCE_URL:-https://github.com/fastfloat/fast_float.git}"
 FAST_FLOAT_VERSION="v8.2.10"
+# 离线镜像内置源码缓存优先;缓存缺失时回退上游官方源(联网场景行为不变)。
+BOOSTKIT_SRC_ROOT="${BOOSTKIT_SRC_ROOT:-/opt/boostkit/src}"
+if [[ -d "${BOOSTKIT_SRC_ROOT}/folly.git" ]]; then
+    FOLLY_SOURCE_URL="file://${BOOSTKIT_SRC_ROOT}/folly.git"
+fi
+if [[ -d "${BOOSTKIT_SRC_ROOT}/fast_float.git" ]]; then
+    FAST_FLOAT_SOURCE_URL="file://${BOOSTKIT_SRC_ROOT}/fast_float.git"
+fi
 
 # 运行期路径(configure_runtime_paths 里赋值)。
 SOURCE_DIR=""

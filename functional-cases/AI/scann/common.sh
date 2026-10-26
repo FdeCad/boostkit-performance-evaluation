@@ -118,7 +118,17 @@ configure_runtime_paths() {
     UV_BIN="${UV_DIR}/uv"
     UV_PYTHON_DIR="${PERF_WORK_DIR}/uv-python"
     if [[ "${FUNC_MODE}" == "prebuilt" ]]; then
+        # scann 的 aarch64 wheel 只兼容 CPython 3.9,镜像可能把它装在专用解释器里;
+        # 优先选真正装了 scann 的那个解释器,默认 python3 没有包时再退回。
         PYBIN="$(command -v python3 2>/dev/null || true)"
+        local candidate
+        for candidate in "${SCANN_PYTHON_BIN:-}" /opt/python39/bin/python3; do
+            [[ -n "${candidate}" && -x "${candidate}" ]] || continue
+            if "${candidate}" -c 'import importlib.metadata as m; m.version("scann")' >/dev/null 2>&1; then
+                PYBIN="${candidate}"
+                break
+            fi
+        done
     else
         PYBIN="${VENV_DIR}/bin/python"
     fi

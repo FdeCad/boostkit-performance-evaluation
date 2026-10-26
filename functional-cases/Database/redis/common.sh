@@ -16,6 +16,11 @@ RESULTS_DIR="${RESULTS_DIR:-}"
 PERF_ACTUAL_VERSION_FILE="${PERF_ACTUAL_VERSION_FILE:-}"
 
 REDIS_SOURCE_URL="${REDIS_SOURCE_URL:-https://github.com/redis/redis.git}"
+# 离线镜像内置源码缓存优先;缓存缺失时回退上游官方源(联网场景行为不变)。
+BOOSTKIT_SRC_ROOT="${BOOSTKIT_SRC_ROOT:-/opt/boostkit/src}"
+if [[ -d "${BOOSTKIT_SRC_ROOT}/redis.git" ]]; then
+    REDIS_SOURCE_URL="file://${BOOSTKIT_SRC_ROOT}/redis.git"
+fi
 REDIS_UPSTREAM_TEST="${REDIS_UPSTREAM_TEST:-unit/type/string}"
 REDIS_SERVICE_PORT="${REDIS_SERVICE_PORT:-}"
 # 上游 Tcl 套件所需的源码树:
